@@ -1,0 +1,11 @@
+services:
+  selenium-llm-engine:
+    build: .
+    container_name: selenium-llm-engine
+    ports:
+      - "14848:8000"  # API port
+      - "3000:3000"   # webtop interface
+    volumes:
+      - data:/app/data
+volumes:
+  data:

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv
+.idea/
+.vscode/
+.pytest_cache/
+
+# SQLite
+data/
+*.db
+
+# Docker
+*.log
+*.pid
+
+# pip cache
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Python environment
+.env
+
+# macOS
+.DS_Store
+
+# generated
+*.egg-info/
+build/
+dist/
+old

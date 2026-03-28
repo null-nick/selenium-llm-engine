@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Selenium LLM Engine Control Panel</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 24px; }
+        button, input, select, textarea { margin: 4px 0; width: 100%; }
+        .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        pre { background: #f5f5f5; padding: 8px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>Selenium LLM Engine</h1>
+    <div class="card">
+        <h2>Status</h2>
+        <button onclick="refreshStats()">Refresh stats</button>
+        <div id="stats"></div>
+    </div>
+    <div class="card">
+        <h2>Login engines</h2>
+        <button onclick="startLogin('chatgpt')">Login ChatGPT</button>
+        <button onclick="startLogin('gemini')">Login Gemini</button>
+        <div id="login-state"></div>
+    </div>
+    <div class="card">
+        <h2>Send Prompt</h2>
+        <select id="engine-select">
+            <option value="chatgpt">ChatGPT</option>
+            <option value="gemini">Gemini</option>
+        </select>
+        <textarea id="prompt-input" rows="4" placeholder="Type prompt..."></textarea>
+        <button onclick="sendPrompt()">Send</button>
+        <h3>Response</h3>
+        <pre id="response-box"></pre>
+    </div>
+
+    <script>
+
+        function apiUrl(path) {
+            // Always use the same origin as the page (protocol, host, port)
+            if (path.startsWith("http")) return path;
+            if (!path.startsWith("/")) path = "/" + path;
+            return window.location.origin + path;
+        }
+
+        async function fetchJson(url, opts) {
+            const res = await fetch(apiUrl(url), opts);
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            return await res.json();
+        }
+
+        async function refreshStats() {
+            const data = await fetchJson('/stats');
+            document.getElementById('stats').textContent = JSON.stringify(data, null, 2);
+        }
+
+        async function startLogin(engine) {
+            const state = await fetchJson(`/login/${engine}`, { method: 'POST' });
+            const stateDiv = document.getElementById('login-state');
+            stateDiv.textContent = `${engine}: ${JSON.stringify(state)}`;
+        }
+
+        async function sendPrompt() {
+            const engine = document.getElementById('engine-select').value;
+            const prompt = document.getElementById('prompt-input').value;
+            const path = `/${engine}/prompt`;
+            const body = { prompt };
+            try {
+                const res = await fetchJson(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                document.getElementById('response-box').textContent = JSON.stringify(res, null, 2);
+            } catch (err) {
+                document.getElementById('response-box').textContent = err.message;
+            }
+        }
+
+        refreshStats();
+    </script>
+</body>
+</html>
