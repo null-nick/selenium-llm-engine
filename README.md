@@ -1,18 +1,20 @@
 # Selenium LLM Engine (Standalone)
 
+> [!NOTE]
+> The application listens on port `8000` by default. Docker Compose maps this to `14848` in this repository, but you can change this mapping freely in `docker-compose.yml`.
+
 This repository provides a standalone, Docker-friendly Selenium-powered LLM engine proxy. It automates browser access to Web GPTs via Selenium to expose a simple OpenAI-compatible API and web admin UI.
 
 ## Features
 
-- Selenium-based support for:
-  - ChatGPT (OpenAI ChatGPT frontend via browser automation)
-  - Gemini (Google Gemini frontend via browser automation)
+- Selenium-based support web based LLM.
 - Unified REST API endpoints:
   - `/api/ping`
   - `/models` and `/models/{engine}`
   - `/login/{engine}` and `/login/{engine}/state`
-  - `/chatgpt/prompt`, `/gemini/prompt`
+  - `/<service>/prompt`,
   - `/v1/chat/completions` (OpenAI-like compatibility)
+  - `/chat/completions` (OpenAI-like legacy compatibility)
   - `/stats`, `/logs`, `/ui`
 - SQLite storage for prompt logs and counters
 - Web UI for simple login, prompt sending and metrics
@@ -28,18 +30,20 @@ docker compose up --build
 
 2. API access:
 
-- `http://localhost:8000/api/ping`
-- `http://localhost:8000/models`
-- `http://localhost:8000/chatgpt/prompt`
-- `http://localhost:8000/gemini/prompt`
-- `http://localhost:8000/v1/chat/completions` (OpenAI-compatible)
-- `http://localhost:8000/ui`
+- `http://localhost:14848/api/ping`
+- `http://localhost:14848/models`
+- `http://localhost:14848/chatgpt/prompt`
+- `http://localhost:14848/gemini/prompt`
+- `http://localhost:14848/stepfun/prompt`
+- `http://localhost:14848/calude/prompt`
+- `http://localhost:14848/v1/chat/completions` (OpenAI-compatible)
+- `http://localhost:14848/ui`
 
 2.1 OpenAPI / OpenAI client
 
 This application exposes an OpenAI-compatible endpoint for clients and SDKs:
 
-- Endpoint: `POST http://localhost:8000/v1/chat/completions`
+- Endpoint: `POST http://localhost:14848/v1/chat/completions`
 - `model`: `chatgpt` or `gemini`
 - `messages`: standard OpenAI array
 
@@ -49,7 +53,7 @@ Example using `openai` (Python):
 from openai import OpenAI
 
 client = OpenAI(api_key="dummy")  # the proxy does not require a real key, values can be dummy
-client.api_base = "http://localhost:8000"
+client.api_base = "http://localhost:14848"
 client.api_type = "openai"
 client.api_version = ""
 
@@ -65,7 +69,7 @@ If the client does not directly support base URL configuration, use a manual req
 ```python
 import requests
 
-url = "http://localhost:8000/v1/chat/completions"
+url = "http://localhost:14848/v1/chat/completions"
 
 payload = {
     "model": "chatgpt",
@@ -81,7 +85,7 @@ print(r.json())
 Before sending a prompt, make sure you have logged in using `/login/chatgpt` or `/login/gemini`.
 
 ```bash
-curl -X POST "http://localhost:8000/chatgpt/prompt" \
+curl -X POST "http://localhost:14848/chatgpt/prompt" \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Write a short poem in English about a robot learning to sing."}'
 ```
@@ -108,8 +112,8 @@ Example response:
 
 4. Login flow (before `/prompt`):
 
-- `POST http://localhost:8000/login/chatgpt`
-- `POST http://localhost:8000/login/gemini`
+- `POST http://localhost:14848/login/chatgpt`
+- `POST http://localhost:14848/login/gemini`
 
 ## Notes
 
@@ -133,7 +137,7 @@ pytest -q
 ## Directory structure
 
 - `app.py` - FastAPI entrypoint
-- `engine/` - Selenium engine wrappers and manager
+- `core/` - Selenium engine wrappers and manager
 - `db/` - SQLite persistence helpers
 - `web/` - minimal static UI
 - `tests/` - API tests
