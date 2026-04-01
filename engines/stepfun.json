@@ -1,0 +1,59 @@
+{
+  "name": "stepfun",
+  "display_name": "StepFun",
+  "aliases": ["stepfun"],
+  "service_url": "https://stepfun.ai",
+  "default_model": "stepfun-default",
+  "allow_unlogged": false,
+  "models": {
+    "stepfun-default": 20000,
+    "default": 20000
+  },
+  "selectors": {
+    "prompt_area": [
+      "div.pt-4.px-4.pb-3 > div.Publisher_input__fjtjQ.relative > div.flex.w-full.align-middle > textarea.Publisher_textarea__pMX9t:not([disabled])",
+      "#«rf» > div > div > div > div.relative.flex-1.flex.flex-col.overflow-hidden > div > div.flex.justify-center > div > div.sticky.top-0.z-[8].pt-8.sh\\:pt-4 > div.relative.w-full.transition-all.duration-300.ease-out.h-[120px] > div > div > div.w-full.flex.flex-col.relative > div.pt-4.px-4.pb-3 > div > div.flex.w-full.align-middle > textarea",
+      "textarea.Publisher_textarea__pMX9t",
+      "textarea[placeholder*='What do you want to know']",
+      "textarea[placeholder*='What do you want to know?']",
+      "textarea"
+    ],
+    "send_button": [
+      "svg.custom-icon-send-outline",
+      "#«R3lar5b» > div > div > div > div.relative.flex-1.flex.flex-col.overflow-hidden > div > div.flex.justify-center > div > div.sticky.top-0.z-[8].pt-8.sh\\:pt-4 > div.relative.w-full.transition-all.duration-300.ease-out.h-[120px] > div > div > div.w-full.flex.flex-col.relative > div.flex.justify-between.items-center.pt-2.pb-4.px-4.overflow-auto > div.flex-shrink-0.flex.flex-row.items-center.gap-3 > button",
+      "#«rc» > div > div > div > div.relative.flex-1.flex.flex-col.overflow-hidden > div > div.flex.justify-center > div > div.sticky.top-0.z-[8].pt-8.sh\\:pt-4 > div.relative.w-full.transition-all.duration-300.ease-out.h-[120px] > div > div > div.w-full.flex.flex-col.relative > div.flex.justify-between.items-center.pt-2.pb-4.px-4.overflow-auto > div.flex-shrink-0.flex.flex-row.items-center.gap-3 > button",
+      "#«rdi» > div > div > div > div.relative.flex-1.flex.flex-col.overflow-hidden > div > div.flex.justify-center > div > div.sticky.top-0.z-[8].pt-8.sh\\:pt-4 > div.relative.w-full.transition-all.duration-300.ease-out.h-[120px] > div > div > div.w-full.flex.flex-col.relative > div.flex.justify-between.items-center.pt-2.pb-4.px-4.overflow-auto > div.flex-shrink-0.flex.flex-row.items-center.gap-3 > button",
+      "#«rdi» > div > div > div > div.relative.flex-1.flex.flex-col.overflow-hidden > div > div.flex.justify-center > div > div.sticky.top-0.z-[8].pt-8.sh\\:pt-4 > div.relative.w-full.transition-all.duration-300.ease-out.h-[120px] > div > div > div.w-full.flex.flex-col.relative > div.flex.justify-between.items-center.pt-2.pb-4.px-4.overflow-auto > div.flex-shrink-0.flex.flex-row.items-center.gap-3 > button > svg",
+      "button.inline-flex.items-center.justify-center",
+      "div.Publisher_input__fjtjQ.relative button",
+      "button[data-testid='send-button']",
+      "button[type='submit']",
+      "button[aria-label*='Send']",
+      "button[title*='Send']"
+    ],
+    "response_area": [
+      "#contentContainer > div.flex.flex-1.w-full.min-h-0.relative > div > div > div:nth-child(1) > div > div > div.flex.flex-1.flex-col > div > div:nth-child(2)",
+      "#contentContainer > div.flex.flex-1.w-full.min-h-0.relative > div > div > div > div > div > div.flex.flex-1.flex-col > div > div:last-child",
+      "div[class*='prose']",
+      "div[class*='markdown']",
+      "main article p"
+    ],
+    "send_button_blacklist": [
+      "#root > div.hidden.fixed.z-30.px-5.top-3.h-10.items-center.transition-all.duration-150.m\\:flex button",
+      "#«rkd» > div > div > div > div.relative.flex-1.flex.flex-col.overflow-hidden > div > div.flex.justify-center > div > div.sticky.top-0.z-[8].pt-8.sh\\:pt-4 > div.relative.w-full.transition-all.duration-300.ease-out.h-[120px] > div > div > div.w-full.flex.flex-col.relative > div.flex.justify-between.items-center.pt-2.pb-4.px-4.overflow-auto > div.flex.justify-center.gap-2.mr-3 > button.inline-flex.items-center.justify-center.gap-1.whitespace-nowrap.text-sm.font-normal.text-content-primary.transition-colors.focus-visible\\:outline-none.disabled\\:pointer-events-none.[\\&_svg]:pointer-events-none.[\\&_svg]:size-4.[\\&_svg]:shrink-0.disabled\\:opacity-35.cursor-pointer.border.hover\\:bg-hover.flex-shrink-0.w-8.h-8.p-0.rounded-lg"    ],
+    "stop": [
+      "button[aria-label*='Cancel']",
+      "button[aria-label*='Stop']"
+    ]
+  },
+  "login_detection": {
+    "url_prefix": "https://stepfun.ai",
+    "url_deny_keywords": ["signin", "login"],
+    "login_button_xpath": "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'login')]",
+    "authenticated_css_selectors": [
+      "div[role='main']",
+      "div[class*='chat']",
+      "textarea.Publisher_textarea__pMX9t"
+    ]
+  }
+}
