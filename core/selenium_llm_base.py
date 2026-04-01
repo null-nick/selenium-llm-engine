@@ -69,6 +69,8 @@ class SeleniumLLMBase:
             "button[aria-label*='Stop']",
             "[data-testid='stop-button']",
         ]
+        # CSS selectors whose matching elements must never be clicked as send button
+        self.send_button_blacklist: list[str] = []
 
     def get_supported_models(self) -> list[str]:
         return list(self.model_limits_map.keys())
@@ -446,6 +448,9 @@ class SeleniumLLMBase:
                 "max retries exceeded",
                 "no such session",
                 "invalid session id",
+                "no such window",
+                "target window already closed",
+                "web view not found",
             )
         )
 
@@ -465,6 +470,22 @@ class SeleniumLLMBase:
 
     def _sync_generate_response(self, prompt: str) -> str:
         """Synchronous core of generate_response — runs in a worker thread."""
+        for attempt in range(2):
+            try:
+                return self._sync_generate_response_once(prompt)
+            except RuntimeError as e:
+                if attempt == 0 and self._is_dead_session(e):
+                    logger.warning(
+                        f"[selenium] Dead session on attempt {attempt + 1}, resetting and retrying…"
+                    )
+                    self._reset_driver()
+                    continue
+                raise
+        # Should not be reached, but satisfy mypy
+        raise RuntimeError("_sync_generate_response exhausted retries")
+
+    def _sync_generate_response_once(self, prompt: str) -> str:
+        """Single attempt of the core generate flow."""
         self._ensure_ready()
 
         unlogged = not self.is_user_logged_in()
@@ -502,12 +523,25 @@ class SeleniumLLMBase:
             if self._is_dead_session(e):
                 self._reset_driver()
                 raise RuntimeError(f"Driver session died mid-prompt: {e}") from e
-            logger.error(f"[selenium] _sync_generate_response failed: {e}")
+            logger.error(f"[selenium] _sync_generate_response_once failed: {e}")
             if unlogged:
                 return f"⚠️ Unlogged session: could not run full prompt flow. Error: {e}"
             raise
 
     # ------------------------------------------------------------------ helpers
+
+    def _get_latest_response_text(self, driver: Any) -> str:
+        """Return latest non-empty text from response selectors, or empty if none."""
+        for sel in self.response_area_selectors:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els:
+                    text = els[-1].text.strip()
+                    if text:
+                        return text
+            except Exception:
+                pass
+        return ""
 
     def _find_interactable_element(
         self,
@@ -581,21 +615,74 @@ class SeleniumLLMBase:
 
     def _click_send(self, driver: Any, input_el: Any) -> None:
         """Click the send button, or fall back to the Enter key."""
+
+        def _is_button_blacklisted(btn: Any) -> bool:
+            for bl_sel in self.send_button_blacklist:
+                try:
+                    matches = driver.find_elements(By.CSS_SELECTOR, bl_sel)
+                    if any(m == btn for m in matches):
+                        logger.debug(f"[selenium] Button matches blacklist selector: {bl_sel}")
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        def _safe_click(btn: Any, selector: str) -> bool:
+            if _is_button_blacklisted(btn):
+                logger.debug(f"[selenium] Skipping blacklisted button for selector: {selector}")
+                return False
+            try:
+                btn.click()
+                logger.debug(f"[selenium] Sent via button click: {selector}")
+                return True
+            except Exception as e:
+                logger.warning(f"[selenium] Button.click() failed for {selector}: {e}")
+            try:
+                driver.execute_script("arguments[0].click();", btn)
+                logger.debug(f"[selenium] Sent via JS click: {selector}")
+                return True
+            except Exception as e:
+                logger.warning(f"[selenium] JS click failed for {selector}: {e}")
+            return False
+
+        def _resolve_click_target(element: Any) -> Any:
+            """If selector matches icon SVG, resolve up to a parent button."""
+            try:
+                if element.tag_name.lower() == "svg":
+                    parent_btn = element.find_element(By.XPATH, "ancestor::button[1]")
+                    if parent_btn is not None:
+                        return parent_btn
+            except Exception:
+                pass
+            return element
+
         for sel in self.send_button_selectors:
             try:
                 btn = WebDriverWait(driver, 3).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
                 )
-                try:
-                    btn.click()
-                except Exception:
-                    driver.execute_script("arguments[0].click();", btn)
-                logger.debug(f"[selenium] Sent via button: {sel}")
-                return
-            except Exception:
-                pass
+                btn = _resolve_click_target(btn)
+                if _safe_click(btn, sel):
+                    return
+            except Exception as e:
+                logger.debug(f"[selenium] selector {sel} not clickable: {e}")
 
-        # Fallback: Enter key on the input element
+        # Secondary fallback: try visible buttons even if not clickable by wait
+        for sel in self.send_button_selectors:
+            try:
+                candidates = driver.find_elements(By.CSS_SELECTOR, sel)
+                for btn in candidates:
+                    try:
+                        resolved_btn = _resolve_click_target(btn)
+                        if resolved_btn.is_displayed() and resolved_btn.is_enabled():
+                            if _safe_click(resolved_btn, sel):
+                                return
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(f"[selenium] selector {sel} not found for fallback click: {e}")
+
+        # Final fallback: Enter key on the input element
         try:
             input_el.send_keys(Keys.RETURN)
             logger.debug("[selenium] Sent via Enter key")
@@ -606,28 +693,27 @@ class SeleniumLLMBase:
         """Wait for the LLM response to fully stream, then return its text.
 
         Strategy:
-        1. Wait up to 30 s for any response element to appear.
-        2. Poll until the stop button is gone AND the text has been stable
-           for at least 3 s (no change between polls).
+        1. Take current last response as baseline (conversation history).
+        2. Wait up to 30 s for a new response text different from baseline.
+        3. Poll until the response is stable (1 s) and stop button disappears.
         """
-        # Phase 1: wait for a response element to appear
-        for sel in self.response_area_selectors:
-            try:
-                WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, sel))
-                )
-                logger.debug(f"[selenium] Response area appeared: {sel}")
-                break
-            except Exception:
-                pass
+        baseline = self._get_latest_response_text(driver)
 
-        # Phase 2: wait for streaming to finish (text stability + no stop button)
         start = time.time()
-        prev = ""
+        while time.time() - start < 30:
+            cur = self._get_latest_response_text(driver)
+            if cur and cur != baseline:
+                logger.debug("[selenium] New response text appeared")
+                break
+            time.sleep(0.5)
+        else:
+            logger.warning("[selenium] Response area did not produce new text within 30s")
+
+        start = time.time()
+        first_new = ""
         stable_since = time.time()
 
         while time.time() - start < max_wait:
-            # --- stop-button check ---
             generating = False
             for sel in self.stop_selectors:
                 try:
@@ -651,33 +737,37 @@ class SeleniumLLMBase:
                 stable_since = time.time()
                 continue
 
-            # --- grab latest response text ---
-            cur = ""
-            for sel in self.response_area_selectors:
-                try:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    if els:
-                        cur = els[-1].text.strip()
-                        if cur:
-                            break
-                except Exception as e:
-                    if self._is_dead_session(e):
-                        logger.error("[selenium] Driver died while reading response")
-                        raise
+            cur = self._get_latest_response_text(driver)
+            cur_url = ""
+            try:
+                cur_url = driver.current_url or ""
+            except Exception:
+                pass
 
-            if cur:
-                if cur == prev:
-                    if time.time() - stable_since >= 3.0:
-                        logger.debug("[selenium] Response stable — done")
-                        return cur
-                else:
+            if cur and cur != baseline:
+                if first_new == "" or cur != first_new:
+                    first_new = cur
                     stable_since = time.time()
-                    prev = cur
+                    logger.debug("[selenium] New response candidate captured")
+
+                if self.service_url and not cur_url.startswith(self.service_url):
+                    logger.warning(
+                        "[selenium] Detected navigation away from service URL; returning captured text"
+                    )
+                    return first_new
+
+                if time.time() - stable_since >= 1.0:
+                    logger.debug("[selenium] Response stable — done")
+                    return first_new
+            elif first_new:
+                if time.time() - stable_since >= 1.0:
+                    logger.debug("[selenium] First new response stable — done")
+                    return first_new
 
             time.sleep(0.5)
 
-        logger.warning("[selenium] Response wait timed out, returning partial result")
-        return prev
+        logger.warning("[selenium] Response wait timed out, returning best-effort result")
+        return first_new or baseline
 
     # ------------------------------------------------------------------ /helpers
 

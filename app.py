@@ -112,6 +112,7 @@ def _openai_chunk(chunk_id: str, model_name: str, content: str, finish_reason: A
 async def startup_event() -> None:
     init_database()
     EngineManager.get()  # initialize manager
+    _register_engine_routes(app)  # dynamic per-engine /name/prompt routes
 
 
 @app.get("/")
@@ -225,36 +226,38 @@ async def engine_prompt(engine_name: str, req: Request) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Legacy per-engine prompt endpoints (kept for backward compatibility)
+# Legacy per-engine prompt endpoints — generated dynamically at startup
 # ---------------------------------------------------------------------------
 
 
-@app.post("/chatgpt/prompt")
-async def chatgpt_prompt(req: Request) -> Any:
-    if _rate_limit_exceeded(req):
-        raise HTTPException(status_code=429, detail="Too many requests")
-    data = await _safe_parse_json(req)
-    return await _prompt(
-        "chatgpt",
-        req,
-        explicit_prompt=data.get("prompt") or data.get("messages"),
-        model_name="chatgpt",
-        stream=bool(data.get("stream", False)),
-    )
+def _register_engine_routes(application: FastAPI) -> None:
+    """Create /{engine_name}/prompt routes for every discovered engine."""
+    mgr = EngineManager.get()
+    for desc in mgr.list_engines():
+        engine_name = desc["name"]
 
+        # Build a closure that captures the canonical engine name
+        def _make_handler(name: str):
+            async def handler(req: Request) -> Any:
+                if _rate_limit_exceeded(req):
+                    raise HTTPException(status_code=429, detail="Too many requests")
+                data = await _safe_parse_json(req)
+                return await _prompt(
+                    name,
+                    req,
+                    explicit_prompt=data.get("prompt") or data.get("messages"),
+                    model_name=name,
+                    stream=bool(data.get("stream", False)),
+                )
+            handler.__name__ = f"{name}_prompt"
+            return handler
 
-@app.post("/gemini/prompt")
-async def gemini_prompt(req: Request) -> Any:
-    if _rate_limit_exceeded(req):
-        raise HTTPException(status_code=429, detail="Too many requests")
-    data = await _safe_parse_json(req)
-    return await _prompt(
-        "gemini",
-        req,
-        explicit_prompt=data.get("prompt") or data.get("messages"),
-        model_name="gemini",
-        stream=bool(data.get("stream", False)),
-    )
+        application.add_api_route(
+            f"/{engine_name}/prompt",
+            _make_handler(engine_name),
+            methods=["POST"],
+        )
+        logger.info(f"[app] Registered route POST /{engine_name}/prompt")
 
 
 @app.get("/v1/models")
