@@ -16,8 +16,8 @@ WEBSOCKIFY_PID=$!
 fluxbox &
 FLUXBOX_PID=$!
 
-# Per login manuale, lancia Chromium SOLO con profilo SEPARATO, NON quello usato da Selenium.
-# Esempio (decommenta solo se serve login manuale):
+# For manual login, launch Chromium ONLY with a SEPARATE profile, NOT the one used by Selenium.
+# Example (uncomment only if you need manual login):
 # chromium --no-sandbox --user-data-dir=/config/.config/chromium-manual --display=:1 --start-maximized &
 # CHROME_PID=$!
 
@@ -25,5 +25,5 @@ FLUXBOX_PID=$!
 cd /app
 uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1
 
-# cleanup (non verrà mai eseguito, ma lasciato per debug)
-# kill $CHROME_PID $FLUXBOX_PID $WEBSOCKIFY_PID $XVFB_PID || true
+# cleanup (will never execute, but kept for debugging)
+kill $FLUXBOX_PID $WEBSOCKIFY_PID $XVFB_PID || true
