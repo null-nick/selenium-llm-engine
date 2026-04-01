@@ -28,10 +28,12 @@ class SeleniumLLMBase:
         default_model: str,
         headless: Optional[bool] = None,
         profile_dir: Optional[str] = None,
+        allow_unlogged: bool = False,
     ):
         self.service_url = service_url
         self.model_limits_map = model_limits_map
         self.default_model = default_model
+        self.allow_unlogged = allow_unlogged
         self.driver = None
 
         if headless is None:
@@ -72,8 +74,12 @@ class SeleniumLLMBase:
         return list(self.model_limits_map.keys())
 
     def get_current_model(self) -> str:
-        # Return 'unlogged' when the engine is not logged in and has this model
-        if not self.is_user_logged_in() and "unlogged" in self.model_limits_map:
+        # Return 'unlogged' when the engine is not logged in, supports it, and has this model
+        if (
+            not self.is_user_logged_in()
+            and self.allow_unlogged
+            and "unlogged" in self.model_limits_map
+        ):
             return "unlogged"
         return self.default_model
 

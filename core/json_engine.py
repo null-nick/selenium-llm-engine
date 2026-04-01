@@ -106,6 +106,7 @@ class JsonEngine(SeleniumLLMBase):
             service_url=config["service_url"],
             model_limits_map=dict(config.get("models", {"default": 10000})),
             default_model=config.get("default_model", "default"),
+            allow_unlogged=bool(config.get("allow_unlogged", False)),
             **kwargs,
         )
 

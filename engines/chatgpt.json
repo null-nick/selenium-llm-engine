@@ -4,6 +4,7 @@
   "aliases": ["chatgpt", "openai", "gpt"],
   "service_url": "https://chat.openai.com",
   "default_model": "gpt-4o",
+  "allow_unlogged": true,
   "models": {
     "gpt-4o": 60000,
     "gpt-4o-mini": 60000,

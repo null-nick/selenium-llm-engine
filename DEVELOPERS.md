@@ -80,6 +80,7 @@ Only `name` and `service_url` are required; everything else is optional.
 | `display_name` | string | no | Human-readable name shown in the UI. |
 | `aliases` | string[] | no | Alternative names for `GET /engine/<alias>/prompt`. |
 | `default_model` | string | no | Model slug used when logged in. Should also appear in `models`. |
+| `allow_unlogged` | boolean | no | If true and `models` includes `unlogged`, `get_current_model()` returns `unlogged` when not logged in. |
 
 #### `models`
 
@@ -219,6 +220,6 @@ curl -s -X POST http://localhost:8000/engine/my_service/prompt \
 - [ ] File is named `engines/<slug>.json` or `engines/<slug>.py` (no spaces, lowercase).
 - [ ] `name` / `ENGINE_NAME` matches the filename slug.
 - [ ] At least one selector in each `selectors.*` list.
-- [ ] `"unlogged"` model entry present in `models` if the site allows unauthenticated use.
+- [ ] `"unlogged"` model entry present in `models` and `"allow_unlogged": true` if the site allows unauthenticated use.
 - [ ] Tested with `POST /api/engines/reload` and a real prompt (or mock test).
 - [ ] PR description mentions which site was tested and Chromium version used.

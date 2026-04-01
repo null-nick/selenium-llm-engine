@@ -148,6 +148,33 @@ def test_api_engines_reload():
     assert isinstance(data["data"], list)
 
 
+def test_unlogged_flag_behavior():
+    from pathlib import Path
+    from core.json_engine import JsonEngine
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    base_engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"unlogged": 20000, "default": 50000},
+        default_model="default",
+    )
+    base_engine.is_user_logged_in = lambda: False
+    assert base_engine.get_current_model() == "default"
+
+    unlogged_engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"unlogged": 20000, "default": 50000},
+        default_model="default",
+        allow_unlogged=True,
+    )
+    unlogged_engine.is_user_logged_in = lambda: False
+    assert unlogged_engine.get_current_model() == "unlogged"
+
+    chatgpt_engine = JsonEngine(Path("engines/chatgpt.json"))
+    chatgpt_engine.is_user_logged_in = lambda: False
+    assert chatgpt_engine.get_current_model() == "unlogged"
+
+
 def test_reset_state():
     manager = EngineManager.get()
     # set active engine then verify reset clears it

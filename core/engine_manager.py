@@ -63,6 +63,7 @@ class EngineDescriptor:
     default_model: str
     source: str  # "json" | "python" | "builtin"
     source_path: str  # filesystem path or "<builtin>"
+    allow_unlogged: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +73,7 @@ class EngineDescriptor:
             "service_url": self.service_url,
             "models": self.models,
             "default_model": self.default_model,
+            "allow_unlogged": self.allow_unlogged,
             "source": self.source,
             "source_path": self.source_path,
         }
@@ -97,6 +99,7 @@ def _scan_json(path: Path) -> Optional[EngineDescriptor]:
             service_url=cfg.get("service_url", ""),
             models=dict(cfg.get("models", {"default": 10000})),
             default_model=cfg.get("default_model", "default"),
+            allow_unlogged=bool(cfg.get("allow_unlogged", False)),
             source="json",
             source_path=str(path),
         )
@@ -129,6 +132,7 @@ def _scan_python(path: Path) -> Optional[EngineDescriptor]:
                     service_url=getattr(obj, "ENGINE_SERVICE_URL", ""),
                     models=dict(getattr(obj, "ENGINE_MODELS", {"default": 10000})),
                     default_model=getattr(obj, "ENGINE_DEFAULT_MODEL", "default"),
+                    allow_unlogged=bool(getattr(obj, "ENGINE_ALLOW_UNLOGGED", False)),
                     source="python",
                     source_path=str(path),
                 )
@@ -243,6 +247,7 @@ def _builtin_descriptors() -> dict[str, EngineDescriptor]:
         default_model="gpt-4o",
         source="builtin",
         source_path="<builtin>",
+        allow_unlogged=True,
     )
     gemini = EngineDescriptor(
         name="gemini",
@@ -260,6 +265,7 @@ def _builtin_descriptors() -> dict[str, EngineDescriptor]:
         default_model="2.5-flash",
         source="builtin",
         source_path="<builtin>",
+        allow_unlogged=True,
     )
     result: dict[str, EngineDescriptor] = {"chatgpt": chatgpt, "gemini": gemini}
     for alias in chatgpt.aliases:
@@ -277,6 +283,7 @@ _BUILTIN_CONFIGS: dict[str, dict] = {
         "aliases": ["chatgpt", "openai", "gpt"],
         "service_url": "https://chat.openai.com",
         "default_model": "gpt-4o",
+        "allow_unlogged": true,
         "models": {
             "gpt-4o": 60000,
             "gpt-4o-mini": 60000,
@@ -332,6 +339,7 @@ _BUILTIN_CONFIGS: dict[str, dict] = {
         "aliases": ["gemini", "google"],
         "service_url": "https://gemini.google.com",
         "default_model": "2.5-flash",
+        "allow_unlogged": true,
         "models": {
             "2.5-flash": 32000,
             "2.0-flash": 32000,
