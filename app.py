@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from collections import defaultdict
@@ -49,9 +50,23 @@ def _rate_limit_exceeded(request: Request) -> bool:
     return False
 
 
+async def _safe_parse_json(request: Request) -> Dict[str, Any]:
+    try:
+        return await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {e}")
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return max(1, len(text) // 4)
+
+
 def _openai_response(
     engine_name: str, model_name: str, prompt: str, response_text: str, elapsed_ms: int
 ) -> Dict[str, Any]:
+    prompt_tokens = _estimate_tokens(prompt)
+    completion_tokens = _estimate_tokens(response_text)
     return {
         "id": f"llm_{int(time.time())}",
         "object": "chat.completion",
@@ -65,14 +80,32 @@ def _openai_response(
             }
         ],
         "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
         },
         "engine": engine_name,
         "prompt": prompt,
         "elapsed_ms": elapsed_ms,
     }
+
+
+def _openai_chunk(chunk_id: str, model_name: str, content: str, finish_reason: Any) -> str:
+    """Format a single SSE chunk in OpenAI chat.completion.chunk format."""
+    payload = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model_name,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": content} if content else {},
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 @app.on_event("startup")
@@ -109,19 +142,31 @@ async def api_engines_reload() -> Dict[str, Any]:
 
 @app.get("/models")
 async def models() -> Dict[str, Any]:
-    """Legacy endpoint — returns engine list in the same format as before."""
+    """Legacy endpoint — returns OpenAI-compatible model list (same as /v1/models).
+    Also includes legacy 'name'/'limits'/'supported_models' fields for backward
+    compatibility with older clients."""
     mgr = EngineManager.get()
-    engine_names = [desc["name"] for desc in mgr.list_engines()]
-    return {
-        "data": [
-            {
-                "name": e,
-                "limits": mgr.get_engine(e).get_interface_limits(),
-                "supported_models": mgr.get_engine(e).get_supported_models(),
-            }
-            for e in engine_names
-        ]
-    }
+    created = int(time.time())
+    data = []
+    for desc in mgr.list_engines():
+        engine_name = desc["name"]
+        entry: Dict[str, Any] = {
+            # OpenAI-compatible fields (required by clients like Alpaca)
+            "id": engine_name,
+            "object": "model",
+            "created": created,
+            "owned_by": "selenium-llm-engine",
+            # Legacy extra fields (kept for backward compat)
+            "name": engine_name,
+        }
+        try:
+            eng = mgr.get_engine(engine_name)
+            entry["limits"] = eng.get_interface_limits()
+            entry["supported_models"] = eng.get_supported_models()
+        except Exception:
+            pass
+        data.append(entry)
+    return {"object": "list", "data": data}
 
 
 @app.get("/models/{engine_name}")
@@ -169,7 +214,7 @@ async def engine_prompt(engine_name: str, req: Request) -> Any:
         canonical = mgr._resolve(engine_name)
     except ValueError:
         raise HTTPException(status_code=404, detail=f"Engine not found: {engine_name}")
-    data = await req.json()
+    data = await _safe_parse_json(req)
     return await _prompt(
         canonical,
         req,
@@ -188,7 +233,7 @@ async def engine_prompt(engine_name: str, req: Request) -> Any:
 async def chatgpt_prompt(req: Request) -> Any:
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
-    data = await req.json()
+    data = await _safe_parse_json(req)
     return await _prompt(
         "chatgpt",
         req,
@@ -202,7 +247,7 @@ async def chatgpt_prompt(req: Request) -> Any:
 async def gemini_prompt(req: Request) -> Any:
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
-    data = await req.json()
+    data = await _safe_parse_json(req)
     return await _prompt(
         "gemini",
         req,
@@ -212,17 +257,55 @@ async def gemini_prompt(req: Request) -> Any:
     )
 
 
+@app.get("/v1/models")
+async def v1_models() -> Dict[str, Any]:
+    """OpenAI-compatible model list. Returns one entry per provider (canonical name).
+    Clients that send model='chatgpt' or model='gemini' will be routed correctly.
+    Aliases and per-variant ids are intentionally excluded to maximise client compatibility."""
+    mgr = EngineManager.get()
+    created = int(time.time())
+    entries: list[Dict[str, Any]] = []
+    for desc in mgr.list_engines():
+        entries.append(
+            {
+                "id": desc["name"],
+                "object": "model",
+                "created": created,
+                "owned_by": "selenium-llm-engine",
+            }
+        )
+    return {"object": "list", "data": entries}
+
+
+@app.get("/v1/models/{model_id:path}")
+async def v1_model_detail(model_id: str) -> Dict[str, Any]:
+    """OpenAI-compatible single model lookup. Supports 'provider' or 'provider:variant'."""
+    mgr = EngineManager.get()
+    provider = model_id.split(":")[0]
+    try:
+        mgr._resolve(provider)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "selenium-llm-engine",
+    }
+
+
 @app.post("/v1/chat/completions")
 async def openai_chat(req: Request) -> Any:
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
 
-    data = await req.json()
-    model = data.get("model", "chatgpt")
-    # Resolve engine name via the registry (supports any engine, not just chatgpt/gemini).
+    data = await _safe_parse_json(req)
+    model = data.get("model") or "chatgpt"
+    # Support provider:variant notation (e.g. "chatgpt:gpt-4o" -> engine="chatgpt")
+    engine_hint = model.split(":")[0]
     mgr = EngineManager.get()
     try:
-        engine = mgr._resolve(model)
+        engine = mgr._resolve(engine_hint)
     except ValueError:
         # Fall back to chatgpt for unrecognised model names (OpenAI compat behaviour)
         engine = "chatgpt"
@@ -241,6 +324,12 @@ async def openai_chat(req: Request) -> Any:
     )
 
 
+# Legacy alias — some clients call /chat/completions without the /v1 prefix
+@app.post("/chat/completions")
+async def openai_chat_legacy(req: Request) -> Any:
+    return await openai_chat(req)
+
+
 async def _prompt(
     engine_name: str,
     req: Request,
@@ -252,7 +341,7 @@ async def _prompt(
         raise HTTPException(status_code=429, detail="Too many requests")
 
     if explicit_prompt is None:
-        payload = await req.json()
+        payload = await _safe_parse_json(req)
         prompt_text = payload.get("prompt") or payload.get("messages")
     else:
         prompt_text = explicit_prompt
@@ -289,14 +378,9 @@ async def _prompt(
                         elapsed_ms,
                     )
                     inc_responses()
-                    payload = _openai_response(
-                        engine_name,
-                        effective_model,
-                        prompt_text,
-                        result,
-                        elapsed_ms,
-                    )
-                    yield f"data: {payload}\n\n"
+                    chunk_id = f"llm_{int(time.time())}"
+                    yield _openai_chunk(chunk_id, effective_model, result, None)
+                    yield _openai_chunk(chunk_id, effective_model, "", "stop")
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     elapsed_ms = int((time.time() - start) * 1000)

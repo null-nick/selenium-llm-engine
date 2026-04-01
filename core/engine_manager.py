@@ -35,9 +35,10 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from core.selenium_llm_base import SeleniumLLMBase
+if TYPE_CHECKING:
+    from core.selenium_llm_base import SeleniumLLMBase
 
 logger = logging.getLogger("engine_manager")
 
@@ -111,6 +112,7 @@ def _scan_json(path: Path) -> Optional[EngineDescriptor]:
 def _scan_python(path: Path) -> Optional[EngineDescriptor]:
     if path.name.startswith("_"):
         return None  # private / template files
+    from core.selenium_llm_base import SeleniumLLMBase  # lazy import to avoid heavy deps at startup
     try:
         spec = importlib.util.spec_from_file_location(f"engines._dyn.{path.stem}", path)
         if spec is None or spec.loader is None:
@@ -196,8 +198,9 @@ def scan_engines(engines_dir: Path) -> dict[str, EngineDescriptor]:
 # ---------------------------------------------------------------------------
 
 
-def _instantiate(descriptor: EngineDescriptor, **kwargs) -> SeleniumLLMBase:
+def _instantiate(descriptor: EngineDescriptor, **kwargs) -> "SeleniumLLMBase":
     """Create a live engine instance from its descriptor."""
+    from core.selenium_llm_base import SeleniumLLMBase  # lazy import to avoid heavy deps at startup
     if descriptor.source == "json":
         from core.json_engine import JsonEngine
 
@@ -283,7 +286,7 @@ _BUILTIN_CONFIGS: dict[str, dict] = {
         "aliases": ["chatgpt", "openai", "gpt"],
         "service_url": "https://chat.openai.com",
         "default_model": "gpt-4o",
-        "allow_unlogged": true,
+        "allow_unlogged": True,
         "models": {
             "gpt-4o": 60000,
             "gpt-4o-mini": 60000,
@@ -339,7 +342,7 @@ _BUILTIN_CONFIGS: dict[str, dict] = {
         "aliases": ["gemini", "google"],
         "service_url": "https://gemini.google.com",
         "default_model": "2.5-flash",
-        "allow_unlogged": true,
+        "allow_unlogged": True,
         "models": {
             "2.5-flash": 32000,
             "2.0-flash": 32000,
@@ -396,7 +399,7 @@ _BUILTIN_CONFIGS: dict[str, dict] = {
 }
 
 
-def _builtin_instance(name: str, **kwargs) -> SeleniumLLMBase:
+def _builtin_instance(name: str, **kwargs) -> "SeleniumLLMBase":
     """Instantiate a built-in engine without requiring the engines/ directory."""
     from core.json_engine import JsonEngine
 
