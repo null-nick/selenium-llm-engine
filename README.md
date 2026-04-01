@@ -5,6 +5,8 @@
 
 This repository provides a standalone, Docker-friendly Selenium-powered LLM engine proxy. It automates browser access to Web GPTs via Selenium to expose a simple OpenAI-compatible API and web admin UI.
 
+Feel free to submit pull requests with improvements, new engines, or engine definitions (`engines/*.json` or `engines/*.py`).
+
 ## Features
 
 - Selenium-based support web based LLM.
@@ -32,6 +34,10 @@ docker compose up --build
 
 - `http://localhost:14848/api/ping`
 - `http://localhost:14848/models`
+
+> [!NOTE]
+> model discovery is dynamic. Although examples use `chatgpt`, `gemini`, `stepfun`, `calude`, the available engines are those present in `engines/` and reported by `/models`.
+
 - `http://localhost:14848/chatgpt/prompt`
 - `http://localhost:14848/gemini/prompt`
 - `http://localhost:14848/stepfun/prompt`
@@ -119,7 +125,7 @@ Example response:
 
 - Requires Chromium + chromedriver and undetected-chromedriver.
 - Container binds persistent profile path: `/config/.config/chromium-synth`.
-- If using Python locally, a compatible FastAPI/Pydantic stack is required.
+- If using Python locally, a compatible FastAPI/Pydantic stack is required, but this approach is not tested nor supported.
 
 ## Legal / Terms of Service (ToS) Notice
 
