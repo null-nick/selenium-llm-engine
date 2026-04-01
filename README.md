@@ -1,4 +1,4 @@
-# Selenium LLM Engine (Standalone)
+# Selenium LLM Engine
 
 > [!NOTE]
 > The application listens on port `8000` by default. Docker Compose maps this to `14848` in this repository, but you can change this mapping freely in `docker-compose.yml`.
