@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import json
 import pytest
 
 from app import app
@@ -92,10 +93,29 @@ def test_ping():
 
 
 def test_models():
+    """Legacy /models must return OpenAI-compatible format (id field required by clients like Alpaca)."""
     response = client.get("/models")
     assert response.status_code == 200
     data = response.json()
+    assert data["object"] == "list"
     assert "data" in data
+    for entry in data["data"]:
+        assert "id" in entry, "Each model entry must have an 'id' field"
+        assert entry["id"] is not None
+        assert entry["object"] == "model"
+        # Legacy extra fields still present
+        assert "name" in entry
+
+
+def test_legacy_chat_completions():
+    """POST /chat/completions (without /v1) must work as alias."""
+    response = client.post(
+        "/chat/completions",
+        json={"model": "chatgpt", "messages": [{"role": "user", "content": "Hi"}]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "chat.completion"
 
 
 def test_login_state():
@@ -109,6 +129,16 @@ def test_prompt_legacy_chatgpt():
     assert response.status_code == 200
     data = response.json()
     assert data["choices"][0]["message"]["content"] == "dummy response"
+
+
+def test_prompt_invalid_json_body():
+    response = client.post(
+        "/chatgpt/prompt",
+        data="http://localhost:14848/v1/chat/completions",
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert "Invalid JSON body" in response.json()["detail"]
 
 
 def test_prompt_dynamic_endpoint():
@@ -201,3 +231,100 @@ def test_api_history_endpoint():
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible /v1/* endpoint tests
+# ---------------------------------------------------------------------------
+
+
+def test_v1_models_list():
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "list"
+    assert isinstance(data["data"], list)
+    ids = [m["id"] for m in data["data"]]
+    assert "chatgpt" in ids
+    assert "gemini" in ids
+    # only canonical names — no aliases, no provider:variant
+    assert not any(":" in mid for mid in ids)
+    for entry in data["data"]:
+        assert entry["object"] == "model"
+        assert entry["owned_by"] == "selenium-llm-engine"
+
+
+def test_v1_models_single():
+    response = client.get("/v1/models/chatgpt")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "chatgpt"
+    assert data["object"] == "model"
+
+
+def test_v1_models_variant():
+    response = client.get("/v1/models/chatgpt:default")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "chatgpt:default"
+
+
+def test_v1_models_unknown():
+    response = client.get("/v1/models/nonexistent_engine")
+    assert response.status_code == 404
+
+
+def test_v1_chat_completions_messages():
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "chatgpt", "messages": [{"role": "user", "content": "Hello"}]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "chat.completion"
+    assert data["choices"][0]["message"]["content"] == "dummy response"
+
+
+def test_v1_chat_null_model():
+    """model=null must not crash — falls back to chatgpt."""
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": None, "messages": [{"role": "user", "content": "Hi"}]},
+    )
+    assert response.status_code == 200
+
+
+def test_v1_chat_provider_variant_model():
+    """provider:variant notation must resolve to the correct engine."""
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "chatgpt:gpt-4o", "messages": [{"role": "user", "content": "Hi"}]},
+    )
+    assert response.status_code == 200
+
+
+def test_token_count_nonzero():
+    response = client.post("/chatgpt/prompt", json={"prompt": "Hello world"})
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] > 0
+    assert usage["completion_tokens"] > 0
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_v1_streaming_sse_format():
+    """stream=True must return SSE with chat.completion.chunk objects."""
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={"model": "chatgpt", "messages": [{"role": "user", "content": "Hi"}], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line for line in resp.iter_lines() if line.startswith("data:")]
+    assert any("[DONE]" in line for line in lines)
+    data_lines = [line for line in lines if "[DONE]" not in line]
+    assert len(data_lines) >= 1
+    for line in data_lines:
+        chunk = json.loads(line.removeprefix("data:").strip())
+        assert chunk["object"] == "chat.completion.chunk"
+        assert "choices" in chunk
