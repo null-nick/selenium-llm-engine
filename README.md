@@ -32,7 +32,49 @@ docker compose up --build
 - `http://localhost:8000/models`
 - `http://localhost:8000/chatgpt/prompt`
 - `http://localhost:8000/gemini/prompt`
+- `http://localhost:8000/v1/chat/completions` (OpenAI-compatible)
 - `http://localhost:8000/ui`
+
+2.1 OpenAPI / OpenAI client
+
+This application exposes an OpenAI-compatible endpoint for clients and SDKs:
+
+- Endpoint: `POST http://localhost:8000/v1/chat/completions`
+- `model`: `chatgpt` or `gemini`
+- `messages`: standard OpenAI array
+
+Example using `openai` (Python):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="dummy")  # the proxy does not require a real key, values can be dummy
+client.api_base = "http://localhost:8000"
+client.api_type = "openai"
+client.api_version = ""
+
+resp = client.chat.completions.create(
+    model="chatgpt",
+    messages=[{"role": "user", "content": "Write a short poem in English about a robot learning to sing."}]
+)
+print(resp)
+```
+
+If the client does not directly support base URL configuration, use a manual request with `requests`:
+
+```python
+import requests
+
+url = "http://localhost:8000/v1/chat/completions"
+
+payload = {
+    "model": "chatgpt",
+    "messages": [{"role": "user", "content": "Scrivi una breve poesia in italiano."}]
+}
+
+r = requests.post(url, json=payload)
+print(r.json())
+```
 
 3. Prompt example (API call)
 
