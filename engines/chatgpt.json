@@ -1,0 +1,55 @@
+{
+  "name": "chatgpt",
+  "display_name": "ChatGPT (OpenAI)",
+  "aliases": ["chatgpt", "openai", "gpt"],
+  "service_url": "https://chat.openai.com",
+  "default_model": "gpt-4o",
+  "models": {
+    "gpt-4o": 60000,
+    "gpt-4o-mini": 60000,
+    "gpt-4-turbo": 50000,
+    "gpt-4": 40000,
+    "gpt-3.5-turbo": 30000,
+    "unlogged": 20000,
+    "default": 51000
+  },
+  "selectors": {
+    "prompt_area": [
+      "div[data-testid='prompt-textarea'][contenteditable='true']",
+      "div.ProseMirror[contenteditable='true']",
+      "div.ProseMirror",
+      "#prompt-textarea",
+      "textarea[data-testid='prompt-textarea']",
+      "div[contenteditable='true'][data-placeholder]",
+      "textarea",
+      "div[contenteditable='true']"
+    ],
+    "send_button": [
+      "button[data-testid='send-button']",
+      "#composer-submit-button",
+      "button[aria-label='Send prompt']",
+      "button[aria-label*='Send']"
+    ],
+    "response_area": [
+      "[data-message-author-role='assistant']",
+      "div.markdown.prose",
+      "div.markdown",
+      ".agent-turn"
+    ],
+    "stop": [
+      "button[data-testid='stop-button']",
+      "button[aria-label='Stop generating']",
+      "button[aria-label*='Stop']"
+    ]
+  },
+  "login_detection": {
+    "url_prefix": "https://chat.openai.com",
+    "url_deny_keywords": ["login", "auth", "signin"],
+    "login_button_xpath": "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in')]",
+    "authenticated_css_selectors": [
+      "div[data-testid='conversation-panel']",
+      "div[data-testid='chat-history']",
+      "div[data-testid='disabled-service']"
+    ]
+  }
+}

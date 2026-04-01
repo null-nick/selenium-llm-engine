@@ -1,0 +1,61 @@
+{
+  "name": "gemini",
+  "display_name": "Gemini (Google)",
+  "aliases": ["gemini", "google"],
+  "service_url": "https://gemini.google.com",
+  "default_model": "2.5-flash",
+  "models": {
+    "2.5-flash": 32000,
+    "2.0-flash": 32000,
+    "1.5-flash": 100000,
+    "1.5-pro": 500000,
+    "unlogged": 21500,
+    "default": 32000
+  },
+  "selectors": {
+    "prompt_area": [
+      "div[contenteditable='true'][data-placeholder]",
+      "div[contenteditable='true'][aria-label*='Ask']",
+      "div[contenteditable='true'][aria-label*='Message']",
+      "div[contenteditable='true'][aria-label*='Enter']",
+      "div.ql-editor[contenteditable='true']",
+      "textarea[placeholder*='Ask']",
+      "textarea[placeholder*='Message']",
+      "div[contenteditable='true']",
+      "textarea"
+    ],
+    "send_button": [
+      "button[aria-label='Send message']",
+      "button[aria-label*='Send message']",
+      "button[data-testid='send-button']",
+      "button[aria-label*='Send']",
+      "button[type='submit']"
+    ],
+    "response_area": [
+      "model-response .markdown",
+      "model-response",
+      ".model-response",
+      ".response-container",
+      "message-content",
+      ".message-content",
+      "div[class*='response-text']"
+    ],
+    "stop": [
+      "button[aria-label='Stop response']",
+      "button[aria-label='Cancel']",
+      "button[aria-label*='Stop']",
+      ".stop-button",
+      "[data-testid='stop-button']"
+    ]
+  },
+  "login_detection": {
+    "url_prefix": "https://gemini.google.com",
+    "url_deny_keywords": ["signin", "login"],
+    "login_button_xpath": "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'login')]",
+    "authenticated_css_selectors": [
+      "div.assistant-message",
+      ".gemini-response",
+      ".chat-message.ai"
+    ]
+  }
+}

@@ -5,64 +5,110 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Selenium LLM Engine Control Panel</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 24px; }
-        button, input, select, textarea { margin: 4px 0; width: 100%; }
-        .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-        pre { background: #f5f5f5; padding: 8px; overflow-x: auto; }
+        *, *::before, *::after { box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f0f2f5; color: #222; }
+        h1 { margin-bottom: 20px; }
+        h2 { margin: 0 0 12px; font-size: 1.1rem; }
+        h3 { margin: 12px 0 6px; font-size: 0.95rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+        .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
+        button { cursor: pointer; padding: 6px 12px; border-radius: 4px; border: 1px solid #aaa; background: #f8f8f8; font-size: 0.9rem; }
+        button:hover { background: #e8e8e8; }
+        button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+        button.primary:hover { background: #1558b0; }
+        button.reload { background: #f5a623; color: #fff; border-color: #f5a623; }
+        select, input, textarea { width: 100%; padding: 6px 8px; margin: 4px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; }
+        textarea { resize: vertical; }
+        pre { background: #f5f5f5; padding: 8px; overflow-x: auto; border-radius: 4px; font-size: 0.82rem; white-space: pre-wrap; word-break: break-word; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.78rem; font-weight: bold; margin-left: 6px; }
+        .badge-json { background: #d4edda; color: #155724; }
+        .badge-python { background: #cce5ff; color: #004085; }
+        .badge-builtin { background: #fff3cd; color: #856404; }
+        .engine-card { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; margin: 8px 0; background: #fafafa; }
+        .engine-card h3 { margin: 0 0 4px; }
+        .engine-meta { font-size: 0.82rem; color: #555; margin: 2px 0; }
+        .engine-actions { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+        #history-content { max-height: 360px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 0.82rem; }
+        .status-ok { color: #155724; }
+        .status-error { color: #721c24; }
+        .filter-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; align-items: center; }
+        .filter-row select, .filter-row input { width: auto; flex: 1; min-width: 140px; }
+        .filter-row button { flex-shrink: 0; }
     </style>
 </head>
 <body>
     <h1>Selenium LLM Engine</h1>
-    <div class="card">
-        <h2>Status</h2>
-        <button onclick="refreshStats()">Refresh stats</button>
-        <button onclick="clearState()">Clear state</button>
-        <div id="stats"></div>
-    </div>
-    <div class="card">
-        <h2>Login engines</h2>
-        <button onclick="startLogin('chatgpt')">Login ChatGPT</button>
-        <button onclick="startLogin('gemini')">Login Gemini</button>
-        <div id="login-state"></div>
-    </div>
-    <div class="card">
-        <h2>Send Prompt</h2>
-        <select id="engine-select">
-            <option value="chatgpt">ChatGPT</option>
-            <option value="gemini">Gemini</option>
-        </select>
-        <textarea id="prompt-input" rows="4" placeholder="Type prompt..."></textarea>
-        <button onclick="sendPrompt()">Send</button>
-        <h3>Response</h3>
-        <pre id="response-box"></pre>
-    </div>
 
-    <div class="card">
-        <h2>LLM Prompt/Response History</h2>
-        <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; align-items: center;">
-            <select id="history-engine-filter" style="width: auto; min-width: 150px;">
-                <option value="">All engines</option>
-                <option value="chatgpt">ChatGPT</option>
-                <option value="gemini">Gemini</option>
-            </select>
-            <input id="history-model-filter" placeholder="Model filter (optional)" style="width: auto; flex: 1; min-width: 150px;" />
-            <select id="history-status-filter" style="width: auto; min-width: 140px;">
-                <option value="">All status</option>
-                <option value="ok">ok</option>
-                <option value="error">error</option>
-            </select>
-            <label style="display:flex; align-items: center; gap: 6px; margin-left: 8px;">
-                <input id="history-autoscroll" type="checkbox" checked /> Auto scroll
-            </label>
-            <button onclick="refreshHistory()" style="width: auto;">Refresh history</button>
+    <div class="grid">
+
+        <!-- ===== Status ===== -->
+        <div class="card">
+            <h2>Status</h2>
+            <div style="display:flex; gap:8px; margin-bottom:10px;">
+                <button onclick="refreshStats()">Refresh stats</button>
+                <button onclick="clearState()" style="color:#c0392b;">Clear state</button>
+            </div>
+            <pre id="stats">—</pre>
         </div>
-        <div id="history-content" style="max-height: 360px; overflow-y: auto; font-family: monospace; white-space: pre-wrap;"></div>
-    </div>
+
+        <!-- ===== Engines Discovery ===== -->
+        <div class="card" style="grid-column: span 2;">
+            <h2>Engines
+                <button class="reload" onclick="reloadEngines()" style="font-size:0.8rem; padding:3px 10px; margin-left:10px;">&#x21BA; Reload</button>
+            </h2>
+            <p style="font-size:0.85rem; color:#555; margin:0 0 10px;">
+                Engines are loaded automatically from the <code>engines/</code> directory.
+                Add a <code>.json</code> or <code>.py</code> file and click Reload — no restart needed.
+            </p>
+            <div id="engines-list">Loading&hellip;</div>
+        </div>
+
+        <!-- ===== Send Prompt ===== -->
+        <div class="card">
+            <h2>Send Prompt</h2>
+            <label>Engine</label>
+            <select id="engine-select">
+                <option value="">Loading engines&hellip;</option>
+            </select>
+            <label>Prompt</label>
+            <textarea id="prompt-input" rows="4" placeholder="Type prompt&hellip;"></textarea>
+            <button class="primary" onclick="sendPrompt()" style="margin-top:8px; width:100%;">Send</button>
+            <h3>Response</h3>
+            <pre id="response-box">—</pre>
+        </div>
+
+        <!-- ===== Prompt History ===== -->
+        <div class="card" style="grid-column: span 2;">
+            <h2>Prompt / Response History</h2>
+            <div class="filter-row">
+                <select id="history-engine-filter">
+                    <option value="">All engines</option>
+                </select>
+                <input id="history-model-filter" placeholder="Model filter (optional)" />
+                <select id="history-status-filter">
+                    <option value="">All status</option>
+                    <option value="ok">ok</option>
+                    <option value="error">error</option>
+                </select>
+                <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">
+                    <input id="history-autoscroll" type="checkbox" checked /> Auto scroll
+                </label>
+                <button onclick="refreshHistory()">Refresh</button>
+            </div>
+            <div id="history-content">—</div>
+        </div>
+
+    </div><!-- .grid -->
+
+    <!-- Login state banner (populated by startLogin) -->
+    <div id="login-banner" style="display:none; position:fixed; bottom:12px; right:16px; background:#333; color:#fff; padding:8px 14px; border-radius:6px; font-size:0.85rem;"></div>
 
     <script>
+        // ----------------------------------------------------------------
+        // API helpers
+        // ----------------------------------------------------------------
 
         function apiUrl(path) {
-            // Always use the same origin as the page (protocol, host, port)
             if (path.startsWith("http")) return path;
             if (!path.startsWith("/")) path = "/" + path;
             return window.location.origin + path;
@@ -70,115 +116,241 @@
 
         async function fetchJson(url, opts) {
             const res = await fetch(apiUrl(url), opts);
-            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-            return await res.json();
+            if (!res.ok) throw new Error(res.status + " " + res.statusText);
+            return res.json();
         }
 
-        async function refreshStats() {
-            const data = await fetchJson('/stats');
-            document.getElementById('stats').textContent = JSON.stringify(data, null, 2);
+        // ----------------------------------------------------------------
+        // Engine discovery
+        // ----------------------------------------------------------------
+
+        var _knownEngines = [];
+
+        async function loadEngines() {
+            try {
+                var data = await fetchJson('/api/engines');
+                _knownEngines = data.data || [];
+            } catch (_) {
+                try {
+                    var fallback = await fetchJson('/models');
+                    _knownEngines = (fallback.data || []).map(function(e) {
+                        return { name: e.name, display_name: e.name, source: 'unknown',
+                                 aliases: [e.name], models: e.supported_models || [],
+                                 default_model: (e.supported_models || ['default'])[0],
+                                 service_url: '' };
+                    });
+                } catch (_2) { _knownEngines = []; }
+            }
+            renderEnginesList();
+            populateEngineDropdowns();
         }
+
+        function _sourceBadge(src) {
+            if (src === 'json')    return '<span class="badge badge-json">JSON</span>';
+            if (src === 'python')  return '<span class="badge badge-python">Python</span>';
+            if (src === 'builtin') return '<span class="badge badge-builtin">built-in</span>';
+            return '';
+        }
+
+        function renderEnginesList() {
+            var container = document.getElementById('engines-list');
+            if (_knownEngines.length === 0) {
+                container.innerHTML = '<p style="color:#888;">No engines found.</p>';
+                return;
+            }
+            container.innerHTML = _knownEngines.map(function(eng) {
+                var modelList = '';
+                if (typeof eng.models === 'object' && !Array.isArray(eng.models)) {
+                    modelList = Object.keys(eng.models).join(', ');
+                } else if (Array.isArray(eng.models)) {
+                    modelList = eng.models.join(', ');
+                }
+                var aliases = (eng.aliases || []).filter(function(a) { return a !== eng.name; }).join(', ');
+                var fileLine = (eng.source_path && eng.source_path !== '<builtin>')
+                    ? '<div class="engine-meta" style="color:#aaa; font-size:0.76rem;"><b>File:</b> ' + eng.source_path + '</div>'
+                    : '';
+                return '<div class="engine-card">'
+                    + '<h3>' + (eng.display_name || eng.name) + ' ' + _sourceBadge(eng.source) + '</h3>'
+                    + '<div class="engine-meta"><b>ID:</b> <code>' + eng.name + '</code>'
+                    + (aliases ? ' &nbsp;&bull;&nbsp; <b>Aliases:</b> ' + aliases : '') + '</div>'
+                    + '<div class="engine-meta"><b>URL:</b> <a href="' + (eng.service_url||'#') + '" target="_blank" rel="noopener">' + (eng.service_url||'—') + '</a></div>'
+                    + '<div class="engine-meta"><b>Models:</b> ' + (modelList||'—') + '</div>'
+                    + fileLine
+                    + '<div class="engine-actions">'
+                    + '<button onclick="startLogin(\'' + eng.name + '\')">Login ' + (eng.display_name||eng.name) + '</button>'
+                    + '<button onclick="checkLoginState(\'' + eng.name + '\')">Check state</button>'
+                    + '<button onclick="selectEngineFor(\'' + eng.name + '\')">Select for prompt</button>'
+                    + '</div></div>';
+            }).join('');
+        }
+
+        function populateEngineDropdowns() {
+            var select = document.getElementById('engine-select');
+            var histFilter = document.getElementById('history-engine-filter');
+            var prevEngine = select.value;
+            var prevHistory = histFilter.value;
+
+            select.innerHTML = _knownEngines.map(function(e) {
+                return '<option value="' + e.name + '">' + (e.display_name||e.name) + '</option>';
+            }).join('');
+            if (prevEngine) select.value = prevEngine;
+
+            histFilter.innerHTML = '<option value="">All engines</option>'
+                + _knownEngines.map(function(e) {
+                    return '<option value="' + e.name + '">' + (e.display_name||e.name) + '</option>';
+                }).join('');
+            if (prevHistory) histFilter.value = prevHistory;
+        }
+
+        function selectEngineFor(name) {
+            document.getElementById('engine-select').value = name;
+            document.getElementById('prompt-input').focus();
+        }
+
+        async function reloadEngines() {
+            var btn = event.currentTarget;
+            btn.disabled = true; btn.textContent = 'Reloading\u2026';
+            try {
+                var data = await fetchJson('/api/engines/reload', { method: 'POST' });
+                _knownEngines = data.data || [];
+                renderEnginesList();
+                populateEngineDropdowns();
+                btn.textContent = '\u2713 Reloaded';
+            } catch (err) {
+                btn.textContent = '\u2717 Error';
+                alert('Reload failed: ' + err.message);
+            } finally {
+                setTimeout(function() { btn.disabled = false; btn.textContent = '\u21BA Reload'; }, 1800);
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Login
+        // ----------------------------------------------------------------
 
         async function startLogin(engine) {
-            const state = await fetchJson(`/login/${engine}`, { method: 'POST' });
-            const stateDiv = document.getElementById('login-state');
-            stateDiv.textContent = `${engine}: ${JSON.stringify(state)}`;
+            var banner = document.getElementById('login-banner');
+            banner.style.display = 'block';
+            banner.textContent = engine + ': requesting login\u2026';
+            try {
+                var state = await fetchJson('/login/' + engine, { method: 'POST' });
+                banner.textContent = engine + ': ' + state.login_state;
+            } catch (err) {
+                banner.textContent = engine + ': error \u2014 ' + err.message;
+            }
+            setTimeout(function() { banner.style.display = 'none'; }, 5000);
+        }
+
+        async function checkLoginState(engine) {
+            try {
+                var state = await fetchJson('/login/' + engine + '/state');
+                alert(engine + ' login state:\n' + JSON.stringify(state, null, 2));
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Stats & reset
+        // ----------------------------------------------------------------
+
+        async function refreshStats() {
+            try {
+                var data = await fetchJson('/stats');
+                document.getElementById('stats').textContent = JSON.stringify(data, null, 2);
+            } catch (err) {
+                document.getElementById('stats').textContent = 'Error: ' + err.message;
+            }
         }
 
         async function clearState() {
-            let apiOk = false;
-            let apiMsg = '';
+            var apiOk = false, apiMsg = '';
             try {
-                const res = await fetchJson('/reset', { method: 'POST' });
-                apiOk = true;
-                apiMsg = `${res.status} - ${res.message}`;
+                var res = await fetchJson('/reset', { method: 'POST' });
+                apiOk = true; apiMsg = res.status + ' - ' + res.message;
             } catch (err) {
-                apiMsg = `Reset call failed: ${err.message}`;
+                apiMsg = 'Reset call failed: ' + err.message;
             } finally {
-                // Always clean up the UI, regardless of whether the API call succeeded
-                const loginStateDiv = document.getElementById('login-state');
-                if (loginStateDiv) loginStateDiv.textContent = 'Cleared. Please re-login.';
-
-                const responseBox = document.getElementById('response-box');
-                if (responseBox) responseBox.textContent = '';
-
-                const statsDiv = document.getElementById('stats');
-                if (statsDiv) statsDiv.textContent = apiOk ? 'State cleared.' : `State cleared (UI only). ${apiMsg}`;
+                document.getElementById('response-box').textContent = '—';
+                document.getElementById('stats').textContent = apiOk ? 'State cleared.' : ('State cleared (UI only). ' + apiMsg);
             }
-            if (apiOk) alert(`Reset status: ${apiMsg}`);
+            if (apiOk) alert('Reset status: ' + apiMsg);
             refreshStats();
         }
 
-        async function refreshHistory() {
-            const engine = document.getElementById('history-engine-filter').value;
-            const model = document.getElementById('history-model-filter').value;
-            const status = document.getElementById('history-status-filter').value;
-            const params = new URLSearchParams({ limit: '200', engine, model, status });
-            const entries = await fetchJson(`/logs?${params}`);
-            const contentEl = document.getElementById('history-content');
-            if (!Array.isArray(entries)) {
-                contentEl.textContent = 'Failed to load history';
-                return;
-            }
-            if (entries.length === 0) {
-                contentEl.textContent = 'No history entries yet.';
-                return;
-            }
-            contentEl.innerHTML = entries
-                .map(e => {
-                    const date = e.created_at;
-                    const safePrompt = e.prompt ? e.prompt.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
-                    const safeResp = e.response ? e.response.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
-                    return `✅ [${date}] ${e.engine}/${e.model} (${e.status}/${e.elapsed_ms}ms)\n` +
-                        `Prompt: ${safePrompt}\nResponse: ${safeResp}\n` +
-                        `----\n`;
-                })
-                .join('');
+        // ----------------------------------------------------------------
+        // Prompt
+        // ----------------------------------------------------------------
 
-            const autoscroll = document.getElementById('history-autoscroll');
-            if (autoscroll && autoscroll.checked) {
-                contentEl.scrollTop = contentEl.scrollHeight;
+        async function sendPrompt() {
+            var engine = document.getElementById('engine-select').value;
+            if (!engine) { alert('Select an engine first.'); return; }
+            var prompt = document.getElementById('prompt-input').value;
+            var box = document.getElementById('response-box');
+            box.textContent = 'Waiting\u2026';
+            try {
+                var res = await fetchJson('/engine/' + engine + '/prompt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: prompt }),
+                });
+                box.textContent = JSON.stringify(res, null, 2);
+            } catch (err) {
+                box.textContent = 'Error: ' + err.message;
+            } finally {
+                refreshHistory();
             }
         }
 
-        function setupAutoscrollPersistence() {
-            const checkbox = document.getElementById('history-autoscroll');
-            if (!checkbox) return;
+        // ----------------------------------------------------------------
+        // History
+        // ----------------------------------------------------------------
 
-            const saved = localStorage.getItem('history_autoscroll_enabled');
-            if (saved === null) {
-                checkbox.checked = true; // default on
-            } else {
-                checkbox.checked = saved === 'true';
+        async function refreshHistory() {
+            var engine = document.getElementById('history-engine-filter').value;
+            var model  = document.getElementById('history-model-filter').value;
+            var status = document.getElementById('history-status-filter').value;
+            var params = new URLSearchParams({ limit: '200', engine: engine, model: model, status: status });
+            try {
+                var entries = await fetchJson('/logs?' + params);
+                var el = document.getElementById('history-content');
+                if (!Array.isArray(entries)) { el.textContent = 'Failed to load history'; return; }
+                if (entries.length === 0)    { el.textContent = 'No history entries yet.'; return; }
+                el.innerHTML = entries.map(function(e) {
+                    var cls = e.status === 'ok' ? 'status-ok' : 'status-error';
+                    var safe = function(s) { return (s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+                    return '<span class="' + cls + '">' + (e.status==='ok'?'&#x2705;':'&#x274C;') + '</span> '
+                        + '[' + e.created_at + '] ' + e.engine + '/' + e.model
+                        + ' (' + e.status + '/' + e.elapsed_ms + 'ms)\n'
+                        + 'Prompt: ' + safe(e.prompt) + '\nResponse: ' + safe(e.response) + '\n----\n';
+                }).join('');
+                var cb = document.getElementById('history-autoscroll');
+                if (cb && cb.checked) el.scrollTop = el.scrollHeight;
+            } catch (err) {
+                document.getElementById('history-content').textContent = 'Error: ' + err.message;
             }
+        }
 
-            checkbox.addEventListener('change', () => {
-                localStorage.setItem('history_autoscroll_enabled', checkbox.checked ? 'true' : 'false');
+        function setupAutoscroll() {
+            var cb = document.getElementById('history-autoscroll');
+            if (!cb) return;
+            var saved = localStorage.getItem('history_autoscroll_enabled');
+            cb.checked = saved === null ? true : saved === 'true';
+            cb.addEventListener('change', function() {
+                localStorage.setItem('history_autoscroll_enabled', cb.checked ? 'true' : 'false');
             });
         }
 
-        window.addEventListener('load', () => {
-            setupAutoscrollPersistence();
+        // ----------------------------------------------------------------
+        // Init
+        // ----------------------------------------------------------------
+
+        window.addEventListener('load', function() {
+            setupAutoscroll();
+            loadEngines();
+            refreshStats();
             refreshHistory();
         });
-
-        async function sendPrompt() {
-            const engine = document.getElementById('engine-select').value;
-            const prompt = document.getElementById('prompt-input').value;
-            const path = `/${engine}/prompt`;
-            const body = { prompt };
-            try {
-                const res = await fetchJson(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-                document.getElementById('response-box').textContent = JSON.stringify(res, null, 2);
-            } catch (err) {
-                document.getElementById('response-box').textContent = err.message;
-            } finally {
-                // Always refresh history: the backend logs both successes and errors
-                await refreshHistory();
-            }
-        }
-
-        refreshStats();
     </script>
 </body>
 </html>

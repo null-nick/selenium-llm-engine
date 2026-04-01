@@ -20,7 +20,7 @@ from db.db import (
     inc_requests,
     inc_responses,
 )
-from engine.engine_manager import EngineManager
+from core.engine_manager import EngineManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("selenium-llm-api")
@@ -92,10 +92,26 @@ async def ping() -> Dict[str, str]:
     return {"status": "ok", "service": "selenium-llm-engine"}
 
 
+@app.get("/api/engines")
+async def api_engines() -> Dict[str, Any]:
+    """List all discovered engines with metadata (no browser started)."""
+    mgr = EngineManager.get()
+    return {"data": mgr.list_engines()}
+
+
+@app.post("/api/engines/reload")
+async def api_engines_reload() -> Dict[str, Any]:
+    """Re-scan the engines/ directory and refresh the registry."""
+    mgr = EngineManager.get()
+    updated = mgr.reload_engines()
+    return {"status": "ok", "data": updated}
+
+
 @app.get("/models")
 async def models() -> Dict[str, Any]:
+    """Legacy endpoint — returns engine list in the same format as before."""
     mgr = EngineManager.get()
-    engines = ["chatgpt", "gemini"]
+    engine_names = [desc["name"] for desc in mgr.list_engines()]
     return {
         "data": [
             {
@@ -103,7 +119,7 @@ async def models() -> Dict[str, Any]:
                 "limits": mgr.get_engine(e).get_interface_limits(),
                 "supported_models": mgr.get_engine(e).get_supported_models(),
             }
-            for e in engines
+            for e in engine_names
         ]
     }
 
@@ -143,15 +159,42 @@ async def login_state(engine_name: str) -> Dict[str, Any]:
     return state
 
 
+@app.post("/engine/{engine_name}/prompt")
+async def engine_prompt(engine_name: str, req: Request) -> Any:
+    """Dynamic prompt endpoint — works for any discovered engine."""
+    if _rate_limit_exceeded(req):
+        raise HTTPException(status_code=429, detail="Too many requests")
+    mgr = EngineManager.get()
+    try:
+        canonical = mgr._resolve(engine_name)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"Engine not found: {engine_name}")
+    data = await req.json()
+    return await _prompt(
+        canonical,
+        req,
+        explicit_prompt=data.get("prompt") or data.get("messages"),
+        model_name=data.get("model", canonical),
+        stream=bool(data.get("stream", False)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Legacy per-engine prompt endpoints (kept for backward compatibility)
+# ---------------------------------------------------------------------------
+
+
 @app.post("/chatgpt/prompt")
 async def chatgpt_prompt(req: Request) -> Any:
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
+    data = await req.json()
     return await _prompt(
         "chatgpt",
         req,
+        explicit_prompt=data.get("prompt") or data.get("messages"),
         model_name="chatgpt",
-        stream=bool((await req.json()).get("stream", False)),
+        stream=bool(data.get("stream", False)),
     )
 
 
@@ -159,11 +202,13 @@ async def chatgpt_prompt(req: Request) -> Any:
 async def gemini_prompt(req: Request) -> Any:
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
+    data = await req.json()
     return await _prompt(
         "gemini",
         req,
+        explicit_prompt=data.get("prompt") or data.get("messages"),
         model_name="gemini",
-        stream=bool((await req.json()).get("stream", False)),
+        stream=bool(data.get("stream", False)),
     )
 
 
@@ -174,7 +219,13 @@ async def openai_chat(req: Request) -> Any:
 
     data = await req.json()
     model = data.get("model", "chatgpt")
-    engine = "gemini" if "gemini" in model.lower() else "chatgpt"
+    # Resolve engine name via the registry (supports any engine, not just chatgpt/gemini).
+    mgr = EngineManager.get()
+    try:
+        engine = mgr._resolve(model)
+    except ValueError:
+        # Fall back to chatgpt for unrecognised model names (OpenAI compat behaviour)
+        engine = "chatgpt"
 
     if "prompt" in data:
         prompt_payload = data.get("prompt")

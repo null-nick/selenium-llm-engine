@@ -1,0 +1,159 @@
+"""Example of a custom Python engine for selenium-llm-engine.
+
+Use this template when the site you want to automate requires custom logic
+that cannot be expressed as a JSON config file (e.g. multi-step auth flows,
+CAPTCHA handling, dynamic DOM manipulation, custom model switching, etc.).
+
+---
+
+HOW TO USE
+----------
+1. Copy this file to ``engines/my_engine.py`` (remove the ``.dist`` suffix).
+2. Fill in the class attributes (ENGINE_NAME, ENGINE_ALIASES, ...).
+3. Implement ``_ensure_logged_in()`` and, if needed, override other methods.
+4. The EngineManager will discover your class automatically on the next
+   restart or after calling ``POST /api/engines/reload``.
+
+See ``DEVELOPERS.md`` for the complete documentation.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from selenium.webdriver.common.by import By
+
+from core.selenium_llm_base import SeleniumLLMBase
+
+logger = logging.getLogger("my_engine")
+
+# ---------------------------------------------------------------------------
+# Required class-level attributes — used by EngineManager for discovery.
+# ---------------------------------------------------------------------------
+
+# Unique canonical name (lowercase, no spaces).
+ENGINE_NAME = "my_engine"
+
+# All names / abbreviations that users can use to refer to this engine.
+ENGINE_ALIASES = ["my_engine", "my-engine"]
+
+# Human-readable label shown in the UI.
+ENGINE_DISPLAY_NAME = "My LLM Site"
+
+# Home URL (where the chat interface lives).
+ENGINE_SERVICE_URL = "https://example.com/chat"
+
+# Map of model slug → max prompt characters.
+ENGINE_MODELS: dict[str, int] = {
+    "default": 10000,
+    "unlogged": 5000,
+}
+
+# Default model slug.
+ENGINE_DEFAULT_MODEL = "default"
+
+
+# ---------------------------------------------------------------------------
+# Engine class
+# ---------------------------------------------------------------------------
+
+
+class MyEngine(SeleniumLLMBase):
+    """Custom engine for <fill in the site name>."""
+
+    # These class-level attributes are picked up by EngineManager during scan.
+    ENGINE_NAME = ENGINE_NAME
+    ENGINE_ALIASES = ENGINE_ALIASES
+    ENGINE_DISPLAY_NAME = ENGINE_DISPLAY_NAME
+    ENGINE_SERVICE_URL = ENGINE_SERVICE_URL
+    ENGINE_MODELS = ENGINE_MODELS
+    ENGINE_DEFAULT_MODEL = ENGINE_DEFAULT_MODEL
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(
+            service_url=ENGINE_SERVICE_URL,
+            model_limits_map=ENGINE_MODELS,
+            default_model=ENGINE_DEFAULT_MODEL,
+            **kwargs,
+        )
+
+        # Override the selector lists to match your target site's DOM.
+        self.prompt_area_selectors = [
+            # Add CSS selectors for the prompt / chat input here.
+            "div[contenteditable='true']",
+            "textarea",
+        ]
+        self.send_button_selectors = [
+            # Add CSS selectors for the send / submit button here.
+            "button[type='submit']",
+            "button[aria-label*='Send']",
+        ]
+        self.response_area_selectors = [
+            # Add CSS selectors for the assistant response container here.
+            ".assistant-message",
+            "div.markdown",
+        ]
+        self.stop_selectors = [
+            # Add CSS selectors for the stop-generation button here.
+            "button[aria-label*='Stop']",
+        ]
+
+    def _ensure_logged_in(self, driver: Any) -> bool:
+        """Return True when the browser is in an authenticated state.
+
+        The implementation below is a common starting point — adapt it to
+        match your site's actual authentication flow.
+        """
+        try:
+            # 1. Navigate to the service URL if we are somewhere else.
+            if not driver.current_url.startswith(ENGINE_SERVICE_URL):
+                driver.get(ENGINE_SERVICE_URL)
+
+            current_url = driver.current_url.lower()
+
+            # 2. Deny keywords in URL path → not logged in.
+            deny_keywords = ["login", "signin", "auth"]
+            if any(kw in current_url for kw in deny_keywords):
+                return False
+
+            # 3. Visible "Sign in" / "Log in" button → not logged in.
+            login_buttons = driver.find_elements(
+                By.XPATH,
+                "//button[contains(normalize-space(.), 'Log in') "
+                "or contains(normalize-space(.), 'Sign in')]",
+            )
+            if any(b.is_displayed() for b in login_buttons):
+                return False
+
+            # 4. Authenticated element present → logged in.
+            authenticated_selectors = [
+                # Replace with CSS selectors that are only present after login.
+                "#chat-container",
+                ".user-avatar",
+            ]
+            for css in authenticated_selectors:
+                els = driver.find_elements(By.CSS_SELECTOR, css)
+                if els and any(e.is_displayed() for e in els):
+                    return True
+
+            # 5. Fallback — assume logged in when there is no evidence otherwise.
+            return True
+
+        except Exception as exc:
+            logger.warning(f"[my_engine] login check failed: {exc}")
+            return False
+
+    # -----------------------------------------------------------------------
+    # Optional overrides
+    # -----------------------------------------------------------------------
+    # Uncomment and implement the methods below only if you need to deviate
+    # from the base-class behaviour.
+
+    # def get_current_model(self) -> str:
+    #     """Detect the currently selected model from the DOM."""
+    #     ...
+
+    # def _sync_generate_response(self, prompt: str) -> str:
+    #     """Completely custom prompt → response flow."""
+    #     ...
