@@ -1,0 +1,44 @@
+{
+  "name": "claude",
+  "display_name": "Claude (Anthropic)",
+  "aliases": ["claude"],
+  "service_url": "https://claude.ai",
+  "default_model": "default",
+  "allow_unlogged": false,
+  "models": {
+    "default": 16000
+  },
+  "selectors": {
+    "prompt_area": [
+      "#main-content > main > div.top-5.z-10.mx-auto.w-full.max-w-2xl > div:nth-child(2) > div > div > fieldset > div.relative > div > div.flex.flex-col.m-3.5.gap-3 > div:nth-child(1) > div.w-full.overflow-y-auto.font-large.break-words.transition-opacity.duration-200.max-h-96.min-h-[3rem].pl-[6px].pt-[6px].[&_ .is-editor-empty]:before:!content-['']",
+      "#main-content input[placeholder*='Type']",
+      "div[contenteditable='true']",
+      "textarea"
+    ],
+    "send_button": [
+      "#main-content > main > div.top-5.z-10.mx-auto.w-full.max-w-2xl > div:nth-child(2) > div > div > fieldset > div.relative > div > div.flex.flex-col.m-3.5.gap-3 > div.relative.flex.gap-2.w-full.items-center > div.shrink-0.flex.items-center > div > div > button",
+      "button[aria-label*='Send']",
+      "button[type='submit']"
+    ],
+    "response_area": [
+      "#main-content > div > div.h-full.flex.flex-col.overflow-hidden.md:pt-[var(--df-header-h,0px)] > div > div > div > div.flex-1.flex.flex-col.px-4.max-w-3xl.mx-auto.w-full.pt-1 > div:nth-child(2) > div > div.contents > div > div > div > div > p",
+      "div[class*='response']",
+      "p"
+    ],
+    "stop": [
+      "#main-content > div > div.h-full.flex.flex-col.overflow-hidden.md:pt-[var(--df-header-h,0px)] > div > div > div > div.sticky.bottom-0.mx-auto.w-full.pt-6.z-[5] > div:nth-child(2) > fieldset > div.relative > div > div.flex.flex-col.m-3.5.gap-3 > div.relative.flex.gap-2.w-full.items-center > div.shrink-0.flex.items-center > div > button",
+      "button[aria-label*='Cancel']",
+      "button[aria-label*='Stop']"
+    ]
+  },
+  "login_detection": {
+    "url_prefix": "https://claude.ai",
+    "url_deny_keywords": ["login", "signin", "auth"],
+    "login_button_xpath": "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'login')]",
+    "authenticated_css_selectors": [
+      "#main-content",
+      "div[class*='chat']",
+      "div[class*='conversation']"
+    ]
+  }
+}
