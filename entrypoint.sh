@@ -16,16 +16,14 @@ WEBSOCKIFY_PID=$!
 fluxbox &
 FLUXBOX_PID=$!
 
-# Start Chromium for manual login if needed
-chromium --no-sandbox --user-data-dir=/config/.config/chromium-synth --display=:1 --start-maximized &
-CHROME_PID=$!
+# Per login manuale, lancia Chromium SOLO con profilo SEPARATO, NON quello usato da Selenium.
+# Esempio (decommenta solo se serve login manuale):
+# chromium --no-sandbox --user-data-dir=/config/.config/chromium-manual --display=:1 --start-maximized &
+# CHROME_PID=$!
 
-# Start API
-uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1 &
-UVICORN_PID=$!
+# Start API (in foreground, so container stays up only if API is running)
+cd /app
+uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1
 
-# Wait for processes
-wait $UVICORN_PID
-
-# cleanup
-kill $CHROME_PID $FLUXBOX_PID $WEBSOCKIFY_PID $XVFB_PID || true
+# cleanup (non verrà mai eseguito, ma lasciato per debug)
+# kill $CHROME_PID $FLUXBOX_PID $WEBSOCKIFY_PID $XVFB_PID || true

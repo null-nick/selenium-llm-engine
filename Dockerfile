@@ -17,6 +17,7 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
 # Inject uv binary from astral image
 COPY --from=uv_source /uv /usr/local/bin/uv
 
+COPY webtop/s6-services/uvicorn /etc/services.d/uvicorn
 # Install system packages and browser deps
 RUN echo 'Package: snapd' > /etc/apt/preferences.d/no-snap && \
     echo 'Pin: release a=*' >> /etc/apt/preferences.d/no-snap && \
@@ -61,24 +62,25 @@ RUN ARCH="${TARGETARCH}" && \
     chromium --version || true
 
 
-# Chromium profile setup (in /app/data/chromium-synth)
-RUN mkdir -p /app/data/chromium-synth && \
-    chown -R abc:abc /app/data && chmod -R 775 /app/data && \
+# Chromium profile setup (in /config/.config/chromium-synth — matches SyntH)
+RUN mkdir -p '/config/.config/chromium-synth' && \
+    chown -R abc:abc /config && \
+    chmod -R 775 /config && \
     mkdir -p /usr/local/share/applications
 
 RUN cat > /usr/local/share/applications/chromium-synth.desktop <<'EOF'
 [Desktop Entry]
 Version=1.0
 Name=Chromium SyntH
-Exec=/usr/bin/chromium --no-sandbox --user-data-dir=/app/data/chromium-synth %U
+Exec=/usr/bin/chromium --no-sandbox --user-data-dir=/config/.config/chromium-synth %U
 Terminal=false
 Type=Application
 Categories=Network;WebBrowser;
 EOF
 
-RUN mkdir -p /app/data/.local/share/applications && \
-    cp /usr/local/share/applications/chromium-synth.desktop /app/data/.local/share/applications/ && \
-    chown -R abc:abc /app/data/.local
+RUN mkdir -p /config/.local/share/applications && \
+    cp /usr/local/share/applications/chromium-synth.desktop /config/.local/share/applications/ && \
+    chown -R abc:abc /config/.local
 
 WORKDIR /app
 COPY requirements.txt .

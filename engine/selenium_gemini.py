@@ -17,7 +17,12 @@ MODEL_LIMITS_MAP = {
 
 class SeleniumGemini(SeleniumLLMBase):
     def __init__(self, **kwargs):
-        super().__init__(service_url=SERVICE_URL, model_limits_map=MODEL_LIMITS_MAP, default_model="2.5-flash", **kwargs)
+        super().__init__(
+            service_url=SERVICE_URL,
+            model_limits_map=MODEL_LIMITS_MAP,
+            default_model="2.5-flash",
+            **kwargs,
+        )
 
     def _ensure_logged_in(self, driver) -> bool:
         try:
@@ -30,13 +35,16 @@ class SeleniumGemini(SeleniumLLMBase):
 
             login_buttons = driver.find_elements(
                 By.XPATH,
-                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'login')]"
+                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'login')]",
             )
             if login_buttons:
                 return False
 
             # Check for Gemini converse panel or assistant output
-            assistant = driver.find_elements(By.CSS_SELECTOR, "div.assistant-message, .gemini-response, .chat-message.ai")
+            assistant = driver.find_elements(
+                By.CSS_SELECTOR,
+                "div.assistant-message, .gemini-response, .chat-message.ai",
+            )
             if assistant:
                 return True
 

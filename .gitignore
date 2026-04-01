@@ -25,6 +25,8 @@ pip-delete-this-directory.txt
 
 # Python environment
 .env
+venv
+.venv
 
 # macOS
 .DS_Store
@@ -34,3 +36,4 @@ pip-delete-this-directory.txt
 build/
 dist/
 old
+.ruff_cache

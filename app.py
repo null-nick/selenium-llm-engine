@@ -1,15 +1,25 @@
 import logging
-import os
 import time
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 
-from db.db import get_prompt_logs, get_stats, init_database, log_prompt, inc_errors, inc_requests, inc_responses
+from db.db import (
+    get_prompt_logs,
+    get_stats,
+    init_database,
+    log_prompt,
+    inc_errors,
+    inc_requests,
+    inc_responses,
+)
 from engine.engine_manager import EngineManager
 
 logging.basicConfig(level=logging.INFO)
@@ -39,7 +49,9 @@ def _rate_limit_exceeded(request: Request) -> bool:
     return False
 
 
-def _openai_response(engine_name: str, model_name: str, prompt: str, response_text: str, elapsed_ms: int) -> Dict[str, Any]:
+def _openai_response(
+    engine_name: str, model_name: str, prompt: str, response_text: str, elapsed_ms: int
+) -> Dict[str, Any]:
     return {
         "id": f"llm_{int(time.time())}",
         "object": "chat.completion",
@@ -68,14 +80,17 @@ async def startup_event() -> None:
     init_database()
     EngineManager.get()  # initialize manager
 
+
 @app.get("/")
 async def root() -> RedirectResponse:
     # Redirect to the web UI for convenience
     return RedirectResponse(url="/ui")
 
+
 @app.get("/api/ping")
 async def ping() -> Dict[str, str]:
     return {"status": "ok", "service": "selenium-llm-engine"}
+
 
 @app.get("/models")
 async def models() -> Dict[str, Any]:
@@ -92,6 +107,7 @@ async def models() -> Dict[str, Any]:
         ]
     }
 
+
 @app.get("/models/{engine_name}")
 async def model_info(engine_name: str) -> Dict[str, Any]:
     try:
@@ -104,6 +120,7 @@ async def model_info(engine_name: str) -> Dict[str, Any]:
         "models": engine.get_supported_models(),
     }
 
+
 @app.post("/login/{engine_name}")
 async def login_engine(engine_name: str) -> Dict[str, Any]:
     try:
@@ -113,6 +130,7 @@ async def login_engine(engine_name: str) -> Dict[str, Any]:
 
     result = await engine.start_login_flow()
     return result
+
 
 @app.get("/login/{engine_name}/state")
 async def login_state(engine_name: str) -> Dict[str, Any]:
@@ -124,17 +142,30 @@ async def login_state(engine_name: str) -> Dict[str, Any]:
     state = await engine.check_login_state()
     return state
 
+
 @app.post("/chatgpt/prompt")
 async def chatgpt_prompt(req: Request) -> Any:
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
-    return await _prompt("chatgpt", req, model_name="chatgpt", stream=bool((await req.json()).get("stream", False)))
+    return await _prompt(
+        "chatgpt",
+        req,
+        model_name="chatgpt",
+        stream=bool((await req.json()).get("stream", False)),
+    )
+
 
 @app.post("/gemini/prompt")
 async def gemini_prompt(req: Request) -> Any:
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
-    return await _prompt("gemini", req, model_name="gemini", stream=bool((await req.json()).get("stream", False)))
+    return await _prompt(
+        "gemini",
+        req,
+        model_name="gemini",
+        stream=bool((await req.json()).get("stream", False)),
+    )
+
 
 @app.post("/v1/chat/completions")
 async def openai_chat(req: Request) -> Any:
@@ -154,12 +185,14 @@ async def openai_chat(req: Request) -> Any:
 
     stream = bool(data.get("stream", False))
 
-    return await _prompt(engine, req, explicit_prompt=prompt_payload, model_name=model, stream=stream)
+    return await _prompt(
+        engine, req, explicit_prompt=prompt_payload, model_name=model, stream=stream
+    )
 
 
 async def _prompt(
     engine_name: str,
-    req: Request = None,
+    req: Request,
     explicit_prompt: Any = None,
     model_name: str = "default",
     stream: bool = False,
@@ -188,20 +221,37 @@ async def _prompt(
     start = time.time()
     try:
         engine = EngineManager.get().set_active_engine(engine_name)
+        effective_model = engine.get_current_model()
 
         if stream:
+
             async def generate_stream():
                 try:
                     result = await engine.generate_response(prompt_text)
                     elapsed_ms = int((time.time() - start) * 1000)
-                    log_prompt(engine_name, engine.get_current_model(), prompt_text, result, "ok", elapsed_ms)
+                    log_prompt(
+                        engine_name,
+                        effective_model,
+                        prompt_text,
+                        result,
+                        "ok",
+                        elapsed_ms,
+                    )
                     inc_responses()
-                    payload = _openai_response(engine_name, model_name, prompt_text, result, elapsed_ms)
+                    payload = _openai_response(
+                        engine_name,
+                        effective_model,
+                        prompt_text,
+                        result,
+                        elapsed_ms,
+                    )
                     yield f"data: {payload}\n\n"
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     elapsed_ms = int((time.time() - start) * 1000)
-                    log_prompt(engine_name, "unknown", prompt_text, str(e), "error", elapsed_ms)
+                    log_prompt(
+                        engine_name, "unknown", prompt_text, str(e), "error", elapsed_ms
+                    )
                     inc_errors()
                     raise HTTPException(status_code=500, detail=str(e))
 
@@ -209,10 +259,23 @@ async def _prompt(
 
         response = await engine.generate_response(prompt_text)
         duration_ms = int((time.time() - start) * 1000)
-        log_prompt(engine_name, engine.get_current_model(), prompt_text, response, "ok", duration_ms)
+        log_prompt(
+            engine_name,
+            effective_model,
+            prompt_text,
+            response,
+            "ok",
+            duration_ms,
+        )
         inc_responses()
 
-        return _openai_response(engine_name, model_name, prompt_text, response, duration_ms)
+        return _openai_response(
+            engine_name,
+            effective_model,
+            prompt_text,
+            response,
+            duration_ms,
+        )
 
     except HTTPException:
         raise
@@ -227,9 +290,58 @@ async def _prompt(
 async def stats() -> Dict[str, Any]:
     return {"stats": get_stats(), "latest_logs": get_prompt_logs(20)}
 
+
+@app.post("/reset")
+async def reset_state() -> Dict[str, Any]:
+    manager = EngineManager.get()
+    errors: list[str] = []
+    try:
+        await manager.stop_all()
+    except Exception as e:
+        logger.warning(f"[reset] stop_all error (continuing): {e}")
+        errors.append(str(e))
+    manager.engines.clear()
+    manager.active_engine = None
+    message = (
+        "Engine state cleared"
+        if not errors
+        else f"Engine state cleared (with errors: {'; '.join(errors)})"
+    )
+    return {"status": "ok", "message": message}
+
+
 @app.get("/logs")
-async def logs(limit: int = 50, offset: int = 0):
-    return get_prompt_logs(limit=limit, offset=offset)
+async def logs(
+    limit: int = 50,
+    offset: int = 0,
+    engine: str | None = None,
+    model: str | None = None,
+    status: str | None = None,
+):
+    return get_prompt_logs(
+        limit=limit,
+        offset=offset,
+        engine=engine,
+        model=model,
+        status=status,
+    )
+
+
+@app.get("/api/history")
+async def history(
+    limit: int = 50,
+    offset: int = 0,
+    engine: str | None = None,
+    model: str | None = None,
+    status: str | None = None,
+):
+    return get_prompt_logs(
+        limit=limit,
+        offset=offset,
+        engine=engine,
+        model=model,
+        status=status,
+    )
 
 
 @app.get("/ui", response_class=HTMLResponse)

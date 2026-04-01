@@ -2,10 +2,14 @@ services:
   selenium-llm-engine:
     build: .
     container_name: selenium-llm-engine
+    environment:
+      - CHROMIUM_HEADLESS=0  # default non-headless; set to 1 to enable headless mode
     ports:
       - "14848:8000"  # API port
-      - "3000:3000"   # webtop interface
+      - "3006:3000"   # webtop interface
     volumes:
       - data:/app/data
+      - config:/config
 volumes:
   data:
+  config:

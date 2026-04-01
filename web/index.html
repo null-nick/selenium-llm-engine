@@ -16,6 +16,7 @@
     <div class="card">
         <h2>Status</h2>
         <button onclick="refreshStats()">Refresh stats</button>
+        <button onclick="clearState()">Clear state</button>
         <div id="stats"></div>
     </div>
     <div class="card">
@@ -34,6 +35,28 @@
         <button onclick="sendPrompt()">Send</button>
         <h3>Response</h3>
         <pre id="response-box"></pre>
+    </div>
+
+    <div class="card">
+        <h2>LLM Prompt/Response History</h2>
+        <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; align-items: center;">
+            <select id="history-engine-filter" style="width: auto; min-width: 150px;">
+                <option value="">All engines</option>
+                <option value="chatgpt">ChatGPT</option>
+                <option value="gemini">Gemini</option>
+            </select>
+            <input id="history-model-filter" placeholder="Model filter (optional)" style="width: auto; flex: 1; min-width: 150px;" />
+            <select id="history-status-filter" style="width: auto; min-width: 140px;">
+                <option value="">All status</option>
+                <option value="ok">ok</option>
+                <option value="error">error</option>
+            </select>
+            <label style="display:flex; align-items: center; gap: 6px; margin-left: 8px;">
+                <input id="history-autoscroll" type="checkbox" checked /> Auto scroll
+            </label>
+            <button onclick="refreshHistory()" style="width: auto;">Refresh history</button>
+        </div>
+        <div id="history-content" style="max-height: 360px; overflow-y: auto; font-family: monospace; white-space: pre-wrap;"></div>
     </div>
 
     <script>
@@ -62,6 +85,83 @@
             stateDiv.textContent = `${engine}: ${JSON.stringify(state)}`;
         }
 
+        async function clearState() {
+            let apiOk = false;
+            let apiMsg = '';
+            try {
+                const res = await fetchJson('/reset', { method: 'POST' });
+                apiOk = true;
+                apiMsg = `${res.status} - ${res.message}`;
+            } catch (err) {
+                apiMsg = `Reset call failed: ${err.message}`;
+            } finally {
+                // Always clean up the UI, regardless of whether the API call succeeded
+                const loginStateDiv = document.getElementById('login-state');
+                if (loginStateDiv) loginStateDiv.textContent = 'Cleared. Please re-login.';
+
+                const responseBox = document.getElementById('response-box');
+                if (responseBox) responseBox.textContent = '';
+
+                const statsDiv = document.getElementById('stats');
+                if (statsDiv) statsDiv.textContent = apiOk ? 'State cleared.' : `State cleared (UI only). ${apiMsg}`;
+            }
+            if (apiOk) alert(`Reset status: ${apiMsg}`);
+            refreshStats();
+        }
+
+        async function refreshHistory() {
+            const engine = document.getElementById('history-engine-filter').value;
+            const model = document.getElementById('history-model-filter').value;
+            const status = document.getElementById('history-status-filter').value;
+            const params = new URLSearchParams({ limit: '200', engine, model, status });
+            const entries = await fetchJson(`/logs?${params}`);
+            const contentEl = document.getElementById('history-content');
+            if (!Array.isArray(entries)) {
+                contentEl.textContent = 'Failed to load history';
+                return;
+            }
+            if (entries.length === 0) {
+                contentEl.textContent = 'No history entries yet.';
+                return;
+            }
+            contentEl.innerHTML = entries
+                .map(e => {
+                    const date = e.created_at;
+                    const safePrompt = e.prompt ? e.prompt.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
+                    const safeResp = e.response ? e.response.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
+                    return `✅ [${date}] ${e.engine}/${e.model} (${e.status}/${e.elapsed_ms}ms)\n` +
+                        `Prompt: ${safePrompt}\nResponse: ${safeResp}\n` +
+                        `----\n`;
+                })
+                .join('');
+
+            const autoscroll = document.getElementById('history-autoscroll');
+            if (autoscroll && autoscroll.checked) {
+                contentEl.scrollTop = contentEl.scrollHeight;
+            }
+        }
+
+        function setupAutoscrollPersistence() {
+            const checkbox = document.getElementById('history-autoscroll');
+            if (!checkbox) return;
+
+            const saved = localStorage.getItem('history_autoscroll_enabled');
+            if (saved === null) {
+                checkbox.checked = true; // default on
+            } else {
+                checkbox.checked = saved === 'true';
+            }
+
+            checkbox.addEventListener('change', () => {
+                localStorage.setItem('history_autoscroll_enabled', checkbox.checked ? 'true' : 'false');
+            });
+        }
+
+        window.addEventListener('load', () => {
+            setupAutoscrollPersistence();
+            refreshHistory();
+        });
+
         async function sendPrompt() {
             const engine = document.getElementById('engine-select').value;
             const prompt = document.getElementById('prompt-input').value;
@@ -72,6 +172,9 @@
                 document.getElementById('response-box').textContent = JSON.stringify(res, null, 2);
             } catch (err) {
                 document.getElementById('response-box').textContent = err.message;
+            } finally {
+                // Always refresh history: the backend logs both successes and errors
+                await refreshHistory();
             }
         }
 

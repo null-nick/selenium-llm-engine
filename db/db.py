@@ -2,7 +2,7 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 DB_FILE = Path(os.getenv("SELENIUM_LLM_DB", "./data/selenium_engine.db"))
 DB_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -49,7 +49,9 @@ def init_database() -> None:
             conn.close()
 
 
-def log_prompt(engine: str, model: str, prompt: str, response: str, status: str, elapsed_ms: int) -> None:
+def log_prompt(
+    engine: str, model: str, prompt: str, response: str, status: str, elapsed_ms: int
+) -> None:
     with DB_LOCK:
         conn = _get_connection()
         try:
@@ -63,15 +65,38 @@ def log_prompt(engine: str, model: str, prompt: str, response: str, status: str,
             conn.close()
 
 
-def get_prompt_logs(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+def get_prompt_logs(
+    limit: int = 100,
+    offset: int = 0,
+    engine: str | None = None,
+    model: str | None = None,
+    status: str | None = None,
+) -> List[Dict[str, Any]]:
     with DB_LOCK:
         conn = _get_connection()
         try:
             cur = conn.cursor()
-            cur.execute(
-                "SELECT * FROM prompt_logs ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            )
+            query = "SELECT * FROM prompt_logs"
+            where_clauses = []
+            params: list[Any] = []
+
+            if engine:
+                where_clauses.append("engine = ?")
+                params.append(engine)
+            if model:
+                where_clauses.append("model = ?")
+                params.append(model)
+            if status:
+                where_clauses.append("status = ?")
+                params.append(status)
+
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            cur.execute(query, tuple(params))
             rows = cur.fetchall()
             return [dict(x) for x in rows]
         finally:
@@ -83,8 +108,12 @@ def _inc_stat(key: str, amount: int = 1) -> None:
         conn = _get_connection()
         try:
             cur = conn.cursor()
-            cur.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", (key, 0))
-            cur.execute("UPDATE stats SET value = value + ? WHERE key = ?", (amount, key))
+            cur.execute(
+                "INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", (key, 0)
+            )
+            cur.execute(
+                "UPDATE stats SET value = value + ? WHERE key = ?", (amount, key)
+            )
             conn.commit()
         finally:
             conn.close()

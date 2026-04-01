@@ -1,0 +1,2 @@
+#!/usr/bin/execlog
+exec s6-log /var/log/uvicorn

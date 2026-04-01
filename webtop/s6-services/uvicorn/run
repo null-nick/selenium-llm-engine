@@ -1,0 +1,32 @@
+#!/command/with-contenv bash
+set -e
+
+# Ensure config directory exists and is writable (matches SyntH pattern)
+mkdir -p /config/.config/chromium-synth
+mkdir -p /app/data
+sudo chmod a+rwx -R /config 2>/dev/null || chmod -R 775 /config 2>/dev/null || true
+chown -R abc:abc /app/data 2>/dev/null || true
+
+echo "[S6 uvicorn] Waiting for /tmp/.X11-unix/X1 (up to 30s)..."
+WAIT_SECONDS=30
+SLEEP_INTERVAL=2
+ELAPSED=0
+while [ ! -e /tmp/.X11-unix/X1 ] && [ "$ELAPSED" -lt "$WAIT_SECONDS" ]; do
+    sleep $SLEEP_INTERVAL
+    ELAPSED=$((ELAPSED + SLEEP_INTERVAL))
+    echo "[S6 uvicorn] Still waiting for /tmp/.X11-unix/X1... (${ELAPSED}/${WAIT_SECONDS}s)"
+done
+
+if [ ! -e /tmp/.X11-unix/X1 ]; then
+    echo "[S6 uvicorn] Timeout waiting for X11 display."
+    # Create placeholder to allow startup (SyntH pattern)
+    mkdir -p /tmp/.X11-unix
+    touch /tmp/.X11-unix/X1
+    echo "[S6 uvicorn] Created placeholder /tmp/.X11-unix/X1"
+fi
+
+export DISPLAY=:1
+
+echo "[S6 uvicorn] Starting uvicorn as abc..."
+cd /app
+exec s6-setuidgid abc /lsiopy/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1

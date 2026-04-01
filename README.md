@@ -34,7 +34,37 @@ docker compose up --build
 - `http://localhost:8000/gemini/prompt`
 - `http://localhost:8000/ui`
 
-3. Login flow (before `/prompt`):
+3. Prompt example (API call)
+
+Before sending a prompt, make sure you have logged in using `/login/chatgpt` or `/login/gemini`.
+
+```bash
+curl -X POST "http://localhost:8000/chatgpt/prompt" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Write a short poem in English about a robot learning to sing."}'
+```
+
+Example response:
+
+```json
+{
+  "id": "llm_1680390000",
+  "object": "chat.completion",
+  "created": 1680390000,
+  "model": "chatgpt",
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "..."},
+    "finish_reason": "stop"
+  }],
+  "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+  "engine": "chatgpt",
+  "prompt": "Write a short poem...",
+  "elapsed_ms": 850
+}
+```
+
+4. Login flow (before `/prompt`):
 
 - `POST http://localhost:8000/login/chatgpt`
 - `POST http://localhost:8000/login/gemini`

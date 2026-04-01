@@ -18,7 +18,12 @@ MODEL_LIMITS_MAP = {
 
 class SeleniumChatGPT(SeleniumLLMBase):
     def __init__(self, **kwargs):
-        super().__init__(service_url=SERVICE_URL, model_limits_map=MODEL_LIMITS_MAP, default_model="gpt-4o", **kwargs)
+        super().__init__(
+            service_url=SERVICE_URL,
+            model_limits_map=MODEL_LIMITS_MAP,
+            default_model="gpt-4o",
+            **kwargs,
+        )
 
     def _ensure_logged_in(self, driver) -> bool:
         try:
@@ -26,18 +31,26 @@ class SeleniumChatGPT(SeleniumLLMBase):
                 driver.get(SERVICE_URL)
 
             current_url = driver.current_url.lower()
-            if "login" in current_url or "auth" in current_url or "signin" in current_url:
+            if (
+                "login" in current_url
+                or "auth" in current_url
+                or "signin" in current_url
+            ):
                 return False
 
             # Check possible login buttons by XPath (case-insensitive)
             login_buttons = driver.find_elements(
                 By.XPATH,
-                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in')]")
+                "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in')]",
+            )
             if login_buttons:
                 return False
 
             # Check chat area presence (authenticated state)
-            chat_area = driver.find_elements(By.CSS_SELECTOR, "div[data-testid='conversation-panel'], div[data-testid='chat-history'], div[data-testid='disabled-service']")
+            chat_area = driver.find_elements(
+                By.CSS_SELECTOR,
+                "div[data-testid='conversation-panel'], div[data-testid='chat-history'], div[data-testid='disabled-service']",
+            )
             if chat_area:
                 return True
 
