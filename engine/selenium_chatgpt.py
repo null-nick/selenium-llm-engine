@@ -25,6 +25,38 @@ class SeleniumChatGPT(SeleniumLLMBase):
             **kwargs,
         )
 
+        # ChatGPT prompt input — the visible ProseMirror div or the backing textarea.
+        # Selectors are tried in order; element_to_be_clickable skips hidden elements,
+        # which avoids the "element not interactable" error on the hidden <textarea>.
+        self.prompt_area_selectors = [
+            "div[data-testid='prompt-textarea'][contenteditable='true']",
+            "div.ProseMirror[contenteditable='true']",
+            "div.ProseMirror",
+            "#prompt-textarea",
+            "textarea[data-testid='prompt-textarea']",
+            "div[contenteditable='true'][data-placeholder]",
+            "textarea",
+            "div[contenteditable='true']",
+        ]
+        self.send_button_selectors = [
+            "button[data-testid='send-button']",
+            "#composer-submit-button",
+            "button[aria-label='Send prompt']",
+            "button[aria-label*='Send']",
+        ]
+        # The most recent assistant message; wait for the last one to stabilise.
+        self.response_area_selectors = [
+            "[data-message-author-role='assistant']",
+            "div.markdown.prose",
+            "div.markdown",
+            ".agent-turn",
+        ]
+        self.stop_selectors = [
+            "button[data-testid='stop-button']",
+            "button[aria-label='Stop generating']",
+            "button[aria-label*='Stop']",
+        ]
+
     def _ensure_logged_in(self, driver) -> bool:
         try:
             if not driver.current_url.startswith("https://chat.openai.com"):

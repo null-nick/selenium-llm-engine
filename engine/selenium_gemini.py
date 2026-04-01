@@ -24,6 +24,43 @@ class SeleniumGemini(SeleniumLLMBase):
             **kwargs,
         )
 
+        # Gemini chat input (contenteditable rich-textarea or plain div).
+        self.prompt_area_selectors = [
+            "div[contenteditable='true'][data-placeholder]",
+            "div[contenteditable='true'][aria-label*='Ask']",
+            "div[contenteditable='true'][aria-label*='Message']",
+            "div[contenteditable='true'][aria-label*='Enter']",
+            "div.ql-editor[contenteditable='true']",
+            "textarea[placeholder*='Ask']",
+            "textarea[placeholder*='Message']",
+            "div[contenteditable='true']",
+            "textarea",
+        ]
+        self.send_button_selectors = [
+            "button[aria-label='Send message']",
+            "button[aria-label*='Send message']",
+            "button[data-testid='send-button']",
+            "button[aria-label*='Send']",
+            "button[type='submit']",
+        ]
+        # Gemini response area — custom elements and class-based selectors.
+        self.response_area_selectors = [
+            "model-response .markdown",
+            "model-response",
+            ".model-response",
+            ".response-container",
+            "message-content",
+            ".message-content",
+            "div[class*='response-text']",
+        ]
+        self.stop_selectors = [
+            "button[aria-label='Stop response']",
+            "button[aria-label='Cancel']",
+            "button[aria-label*='Stop']",
+            ".stop-button",
+            "[data-testid='stop-button']",
+        ]
+
     def _ensure_logged_in(self, driver) -> bool:
         try:
             if not driver.current_url.startswith("https://gemini.google.com"):
