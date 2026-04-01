@@ -121,6 +121,8 @@ class JsonEngine(SeleniumLLMBase):
             self.response_area_selectors = list(sel["response_area"])
         if "stop" in sel:
             self.stop_selectors = list(sel["stop"])
+        if "send_button_blacklist" in sel:
+            self.send_button_blacklist = list(sel["send_button_blacklist"])
 
         # ------------------------------------------------------------------ login rules
         self._login_cfg: dict[str, Any] = config.get("login_detection", {})
