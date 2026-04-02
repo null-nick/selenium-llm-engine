@@ -37,3 +37,6 @@ build/
 dist/
 old
 .ruff_cache
+
+# Others
+.github/prompts
