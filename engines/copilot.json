@@ -1,0 +1,46 @@
+{
+  "name": "copilot",
+  "display_name": "Copilot (Microsoft)",
+  "aliases": ["copilot", "microsoft"],
+  "service_url": "https://copilot.microsoft.com/",
+  "notes": "Might work even unlogged but is very unstable, hence the unlogged mode is disabled.",
+  "default_model": "unlogged",
+  "allow_unlogged": false,
+  "models": {
+    "unlogged": 28000,
+    "default": 28000
+  },
+  "selectors": {
+    "prompt_area": [
+      "#app > div.flex.h-full.overflow-hidden.bg-sidebar-light.dark\\:bg-sidebar-dark > main > div.relative.size-full.overflow-hidden > div.relative.size-full.overflow-hidden.md\\:rounded-container > div.pointer-events-none.absolute.bottom-0.w-full.sm\\:bottom-1\\/2.sm\\:translate-y-1\\/2.sm\\:pt-36 > div > div > div > div.relative.max-h-full.min-h-composer.min-w-16.max-w-chat.rounded-5xl > div.relative.shadow-tinted-xl.backdrop-blur-2xl.backdrop-saturate-200.bg-accent-100\\/60.dark\\:bg-muted-200\\/50 > div > div > div > div.relative.flex.grow.flex-col.overflow-hidden.before\\:absolute.before\\:inset-0.before\\:rounded-3xl.before\\:border-2.before\\:border-stroke-350.w-auto.rounded-3xl.contrast-more\\:border-2.before\\:opacity-0 > div.flex.items-end.min-h-0.w-auto.grow.mt-1 > div.relative.grow.overflow-hidden > div > div",
+      "textarea[placeholder*='Ask']",
+      "div[contenteditable='true']",
+      "textarea"
+    ],
+    "send_button": [
+      "#app > div.flex.h-full.overflow-hidden.bg-sidebar-light.dark\\:bg-sidebar-dark > main > div.relative.size-full.overflow-hidden > div.relative.size-full.overflow-hidden.md\\:rounded-container > div.pointer-events-none.absolute.bottom-0.w-full.sm\\:bottom-1\\/2.sm\\:translate-y-1\\/2.sm\\:pt-36 > div > div > div > div.relative.max-h-full.min-h-composer.min-w-16.max-w-chat.rounded-5xl > div.relative.shadow-tinted-xl.backdrop-blur-2xl.backdrop-saturate-200.bg-accent-100\\/60.dark\\:bg-muted-200\\/50 > div > div > div > div.relative.bottom-0.flex.justify-between.pb-0\\.5.pe-2\\.5.ps-1\\.5 > div:nth-child(2) > div > button",
+      "button[aria-label='Send message']",
+      "button[aria-label*='Send']",
+      "button[type='submit']"
+    ],
+    "response_area": [
+      "#ots67gXEN96v6YuQxTjQa-content-0",
+      "#app > div.flex.h-full.overflow-hidden.bg-sidebar-light.dark\\:bg-sidebar-dark > main > div.relative.h-full.flex-1.overflow-hidden.will-change-auto > div.relative.size-full.overflow-hidden.md\\:rounded-container > div.\\@container\\/chat.flex.h-full.max-h-dvh.w-full.flex-col.items-center.text-foreground-800.sm\\:min-w-secondary-panel-slim.lg\\:min-w-secondary-panel.overflow-y-auto.overflow-x-hidden.scrollbar-stable.t-custom-scrollbar > div.px-6.max-w-chat.w-full.flex.h-full.grow.flex-col > div.min-h-\\[calc\\(100\\%-56px\\)\\].flex.shrink-0.flex-col > div.pt-3.pb-6.inline-block.w-full.space-y-8 > div.group\\/ai-message > div.space-y-3.mt-3",
+      "div.group\\/ai-message-item",
+      "div[class*='ai-message']",
+      "div[class*='response']"
+    ],
+    "stop": [
+      "button[aria-label='Interrupt message']",
+      "button[title='Interrupt message']",
+      "button[aria-label*='Stop']",
+      "button[data-testid='stop-button']"
+    ]
+  },
+  "login_detection": {
+    "url_prefix": "https://copilot.microsoft.com/login",
+    "url_deny_keywords": ["login", "signin", "auth"],
+    "login_button_xpath": "//button[@data-testid='sidebar-settings-button' or @title='Sign in' or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'get started') ]",
+    "authenticated_css_selectors": ["div.group\\/ai-message", "div.chat-message.ai", "div[data-testid='conversation-container']"]
+  }
+}
