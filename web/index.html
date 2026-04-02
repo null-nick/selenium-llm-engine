@@ -5,50 +5,306 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Selenium LLM Engine Control Panel</title>
     <style>
+        /* ----------------------------------------------------------------
+           CSS custom properties — all colours defined here, never hardcoded
+           ---------------------------------------------------------------- */
+        :root {
+            --bg:              #f0f2f5;
+            --bg-card:         #ffffff;
+            --border:          #dddddd;
+            --text:            #222222;
+            --text-muted:      #555555;
+            --text-dim:        #888888;
+            --pre-bg:          #f5f5f5;
+            --input-bg:        #ffffff;
+            --input-border:    #cccccc;
+            --engine-card-bg:  #fafafa;
+            --table-head-bg:   #f0f0f0;
+            --table-border:    #eeeeee;
+            --btn-bg:          #f8f8f8;
+            --btn-hover:       #e8e8e8;
+            --btn-border:      #aaaaaa;
+            --link:            #1a73e8;
+            --log-bg:          #f5f5f5;
+            --log-text:        #1a1b26;
+            --log-info:        #026aa7;
+            --log-warn:        #b48a31;
+            --log-error:       #a40e26;
+            --log-debug:       #56617f;
+        }
+
+        html[data-theme="dark"] {
+            --bg:              #1a1b26;
+            --bg-card:         #24283b;
+            --border:          #3b4261;
+            --text:            #c0caf5;
+            --text-muted:      #9aa5ce;
+            --text-dim:        #565f89;
+            --pre-bg:          #1e2030;
+            --input-bg:        #1e2030;
+            --input-border:    #3b4261;
+            --engine-card-bg:  #1e2030;
+            --table-head-bg:   #1e2030;
+            --table-border:    #3b4261;
+            --btn-bg:          #2f3555;
+            --btn-hover:       #3b4261;
+            --btn-border:      #3b4261;
+            --link:            #7aa2f7;
+            --log-bg:          #13131a;
+            --log-text:        #cdd6f4;
+            --log-info:        #89dceb;
+            --log-warn:        #f9e2af;
+            --log-error:       #f38ba8;
+            --log-debug:       #6c7086;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            html:not([data-theme]) {
+                --bg:              #1a1b26;
+                --bg-card:         #24283b;
+                --border:          #3b4261;
+                --text:            #c0caf5;
+                --text-muted:      #9aa5ce;
+                --text-dim:        #565f89;
+                --pre-bg:          #1e2030;
+                --input-bg:        #1e2030;
+                --input-border:    #3b4261;
+                --engine-card-bg:  #1e2030;
+                --table-head-bg:   #1e2030;
+                --table-border:    #3b4261;
+                --btn-bg:          #2f3555;
+                --btn-hover:       #3b4261;
+                --btn-border:      #3b4261;
+                --link:            #7aa2f7;
+                --log-bg:          #13131a;
+                --log-text:        #cdd6f4;
+                --log-info:        #89dceb;
+                --log-warn:        #f9e2af;
+                --log-error:       #f38ba8;
+                --log-debug:       #6c7086;
+            }
+        }
+
         *, *::before, *::after { box-sizing: border-box; }
-        body { font-family: Arial, sans-serif; margin: 0; padding: 24px; background: #f0f2f5; color: #222; }
-        h1 { margin-bottom: 20px; }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 24px;
+            background: var(--bg);
+            color: var(--text);
+            transition: background 0.2s, color 0.2s;
+        }
+
+        .page-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        h1 { margin: 0; flex: 1; }
         h2 { margin: 0 0 12px; font-size: 1.1rem; }
         h3 { margin: 12px 0 6px; font-size: 0.95rem; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
-        .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
-        button { cursor: pointer; padding: 6px 12px; border-radius: 4px; border: 1px solid #aaa; background: #f8f8f8; font-size: 0.9rem; }
-        button:hover { background: #e8e8e8; }
-        button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+        a  { color: var(--link); }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+            gap: 16px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        button {
+            cursor: pointer;
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: 1px solid var(--btn-border);
+            background: var(--btn-bg);
+            color: var(--text);
+            font-size: 0.9rem;
+        }
+        button:hover    { background: var(--btn-hover); }
+        button:disabled { opacity: 0.5; cursor: default; }
+        button.primary  { background: #1a73e8; color: #fff; border-color: #1a73e8; }
         button.primary:hover { background: #1558b0; }
-        button.reload { background: #f5a623; color: #fff; border-color: #f5a623; }
-        select, input, textarea { width: 100%; padding: 6px 8px; margin: 4px 0; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; }
+        button.reload   { background: #f5a623; color: #fff; border-color: #f5a623; }
+
+        select, input, textarea {
+            width: 100%;
+            padding: 6px 8px;
+            margin: 4px 0;
+            border: 1px solid var(--input-border);
+            border-radius: 4px;
+            font-size: 0.9rem;
+            background: var(--input-bg);
+            color: var(--text);
+        }
         textarea { resize: vertical; }
-        pre { background: #f5f5f5; padding: 8px; overflow-x: auto; border-radius: 4px; font-size: 0.82rem; white-space: pre-wrap; word-break: break-word; }
-        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.78rem; font-weight: bold; margin-left: 6px; }
-        .badge-json { background: #d4edda; color: #155724; }
-        .badge-python { background: #cce5ff; color: #004085; }
+
+        pre {
+            background: var(--pre-bg);
+            padding: 8px;
+            overflow-x: auto;
+            border-radius: 4px;
+            font-size: 0.82rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: var(--text);
+        }
+
+        /* Badges */
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.78rem;
+            font-weight: bold;
+            margin-left: 6px;
+        }
+        .badge-json    { background: #d4edda; color: #155724; }
+        .badge-python  { background: #cce5ff; color: #004085; }
         .badge-builtin { background: #fff3cd; color: #856404; }
-        .engine-card { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; margin: 8px 0; background: #fafafa; }
+        .badge-logged  { background: #6d28d9; color: #ffffff; }
+
+        html[data-theme="dark"] .badge-json    { background: #1a3a26; color: #6ee7b7; }
+        html[data-theme="dark"] .badge-python  { background: #1a2a4a; color: #93c5fd; }
+        html[data-theme="dark"] .badge-builtin { background: #3a2a00; color: #fcd34d; }
+
+        @media (prefers-color-scheme: dark) {
+            html:not([data-theme]) .badge-json    { background: #1a3a26; color: #6ee7b7; }
+            html:not([data-theme]) .badge-python  { background: #1a2a4a; color: #93c5fd; }
+            html:not([data-theme]) .badge-builtin { background: #3a2a00; color: #fcd34d; }
+        }
+
+        /* Engine cards */
+        .engine-card {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin: 8px 0;
+            background: var(--engine-card-bg);
+        }
         .engine-card h3 { margin: 0 0 4px; }
-        .engine-meta { font-size: 0.82rem; color: #555; margin: 2px 0; }
-        .engine-actions { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
-        #history-content { max-height: 360px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 0.82rem; }
-        .status-ok { color: #155724; }
-        .status-error { color: #721c24; }
+        .engine-meta    { font-size: 0.82rem; color: var(--text-muted); margin: 2px 0; }
+        .engine-actions { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+        .check-result {
+            display: none;
+            margin-top: 6px;
+            padding: 6px 10px;
+            border-radius: 4px;
+            background: var(--pre-bg);
+            font-size: 0.82rem;
+            font-family: monospace;
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: var(--text);
+            border-left: 3px solid var(--link);
+        }
+
+        /* Stats table */
+        .stats-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        .stats-table td { padding: 6px 8px; border-bottom: 1px solid var(--table-border); }
+        .stats-table tr:last-child td { border-bottom: none; }
+        .stats-table td:first-child { color: var(--text-muted); }
+        .stats-table td:last-child  { font-weight: bold; text-align: right; }
+
+        /* Log box */
+        .log-box {
+            height: 340px;
+            overflow-y: auto;
+            background: var(--log-bg);
+            color: var(--log-text);
+            font-family: monospace;
+            font-size: 0.8rem;
+            padding: 8px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .log-INFO     { color: var(--log-info); }
+        .log-WARNING  { color: var(--log-warn); }
+        .log-ERROR    { color: var(--log-error); font-weight: bold; }
+        .log-CRITICAL { color: var(--log-error); font-weight: bold; }
+        .log-DEBUG    { color: var(--log-debug); }
+
+        /* Filter row */
         .filter-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; align-items: center; }
         .filter-row select, .filter-row input { width: auto; flex: 1; min-width: 140px; }
         .filter-row button { flex-shrink: 0; }
+
+        /* Selector hints */
+        .hint-ok   { color: #155724; }
+        .hint-warn { color: #856404; }
+        .hint-none { color: var(--text-dim); font-style: italic; }
+
+        html[data-theme="dark"] .hint-ok   { color: #6ee7b7; }
+        html[data-theme="dark"] .hint-warn { color: #fcd34d; }
+        @media (prefers-color-scheme: dark) {
+            html:not([data-theme]) .hint-ok   { color: #6ee7b7; }
+            html:not([data-theme]) .hint-warn { color: #fcd34d; }
+        }
+
+        .sel-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        .sel-table th, .sel-table td {
+            text-align: left;
+            padding: 4px 8px;
+            border-bottom: 1px solid var(--table-border);
+        }
+        .sel-table thead tr { background: var(--table-head-bg); }
+        .sel-table code {
+            background: var(--pre-bg);
+            padding: 1px 4px;
+            border-radius: 3px;
+            color: var(--text);
+        }
+
+        #theme-btn { padding: 5px 12px; font-size: 0.85rem; white-space: nowrap; }
     </style>
+
+    <script>
+        /* Apply theme immediately to prevent flash of unstyled content */
+        (function () {
+            var saved = localStorage.getItem('theme');
+            if (saved === 'dark' || saved === 'light') {
+                document.documentElement.setAttribute('data-theme', saved);
+            }
+        }());
+    </script>
 </head>
 <body>
-    <h1>Selenium LLM Engine</h1>
+    <div class="page-header">
+        <h1>Selenium LLM Engine</h1>
+        <button id="theme-btn" onclick="cycleTheme()">&#x2299; Auto</button>
+    </div>
 
     <div class="grid">
 
-        <!-- ===== Status ===== -->
+        <!-- ===== Stats ===== -->
         <div class="card">
-            <h2>Status</h2>
-            <div style="display:flex; gap:8px; margin-bottom:10px;">
-                <button onclick="refreshStats()">Refresh stats</button>
-                <button onclick="clearState()" style="color:#c0392b;">Clear state</button>
+            <h2>Stats
+                <button onclick="refreshStats()" style="font-size:0.8rem; padding:3px 10px; margin-left:10px;">&#x21BA; Refresh</button>
+            </h2>
+            <table class="stats-table">
+                <tbody>
+                    <tr><td>Requests sent</td><td id="stat-requests">&#x2014;</td></tr>
+                    <tr><td>Responses OK</td><td id="stat-responses">&#x2014;</td></tr>
+                    <tr><td>Errors</td><td id="stat-errors">&#x2014;</td></tr>
+                    <tr><td>Success rate</td><td id="stat-rate">&#x2014;</td></tr>
+                    <tr><td>Avg response time (global)</td><td id="stat-avg-ms">&#x2014;</td></tr>
+                    <tr><td>Avg response time (per engine)</td><td id="stat-per-engine-ms">&#x2014;</td></tr>
+                </tbody>
+            </table>
+            <div style="margin-top:10px;">
+                <button onclick="clearState()" style="color:#c0392b; font-size:0.85rem;">&#x2716; Clear engine state</button>
             </div>
-            <pre id="stats">—</pre>
         </div>
 
         <!-- ===== Engines Discovery ===== -->
@@ -56,11 +312,24 @@
             <h2>Engines
                 <button class="reload" onclick="reloadEngines()" style="font-size:0.8rem; padding:3px 10px; margin-left:10px;">&#x21BA; Reload</button>
             </h2>
-            <p style="font-size:0.85rem; color:#555; margin:0 0 10px;">
+            <p style="font-size:0.85rem; color:var(--text-muted); margin:0 0 10px;">
                 Engines are loaded automatically from the <code>engines/</code> directory.
-                Add a <code>.json</code> or <code>.py</code> file and click Reload — no restart needed.
+                Add a <code>.json</code> or <code>.py</code> file and click Reload &mdash; no restart needed.
             </p>
             <div id="engines-list">Loading&hellip;</div>
+        </div>
+
+        <!-- ===== Selector Hints ===== -->
+        <div class="card" style="grid-column: span 2;">
+            <h2>Selector Hints
+                <button onclick="refreshSelectorHints()" style="font-size:0.8rem; padding:3px 10px; margin-left:10px;">&#x21BA; Refresh</button>
+            </h2>
+            <p style="font-size:0.85rem; color:var(--text-muted); margin:0 0 10px;">
+                Shows the selectors that actually worked at runtime for each active engine.
+                If a selector is not at position&nbsp;0 in the JSON file, move it there to skip
+                the per-selector timeout on every future prompt.
+            </p>
+            <div id="selector-hints-content"><em class="hint-none">No data yet &mdash; send at least one prompt, then click Refresh.</em></div>
         </div>
 
         <!-- ===== Send Prompt ===== -->
@@ -74,57 +343,102 @@
             <textarea id="prompt-input" rows="4" placeholder="Type prompt&hellip;"></textarea>
             <button class="primary" onclick="sendPrompt()" style="margin-top:8px; width:100%;">Send</button>
             <h3>Response</h3>
-            <pre id="response-box">—</pre>
+            <pre id="response-box">&#x2014;</pre>
         </div>
 
-        <!-- ===== Prompt History ===== -->
+        <!-- ===== Logs ===== -->
         <div class="card" style="grid-column: span 2;">
-            <h2>Prompt / Response History</h2>
+            <h2>Logs</h2>
             <div class="filter-row">
-                <select id="history-engine-filter">
-                    <option value="">All engines</option>
-                </select>
-                <input id="history-model-filter" placeholder="Model filter (optional)" />
-                <select id="history-status-filter">
-                    <option value="">All status</option>
-                    <option value="ok">ok</option>
-                    <option value="error">error</option>
-                </select>
                 <label style="display:flex; align-items:center; gap:6px; white-space:nowrap;">
-                    <input id="history-autoscroll" type="checkbox" checked /> Auto scroll
+                    <input id="log-autoscroll" type="checkbox" checked /> Auto scroll
                 </label>
-                <button onclick="refreshHistory()">Refresh</button>
+                <button onclick="clearLogs()" style="font-size:0.85rem;">&#x2716; Clear</button>
             </div>
-            <div id="history-content">—</div>
+            <div id="log-content" class="log-box"></div>
         </div>
 
     </div><!-- .grid -->
 
-    <!-- Login state banner (populated by startLogin) -->
+    <!-- Login state banner -->
     <div id="login-banner" style="display:none; position:fixed; bottom:12px; right:16px; background:#333; color:#fff; padding:8px 14px; border-radius:6px; font-size:0.85rem;"></div>
 
     <script>
         // ----------------------------------------------------------------
+        // Theme
+        // ----------------------------------------------------------------
+        var _themeOrder  = ['auto', 'light', 'dark'];
+        var _themeLabels = { auto: '\u2299 Auto', light: '\u2600\uFE0F Light', dark: '\uD83C\uDF19 Dark' };
+
+        function _currentTheme() {
+            return localStorage.getItem('theme') || 'auto';
+        }
+
+        function setTheme(theme) {
+            if (theme === 'dark' || theme === 'light') {
+                document.documentElement.setAttribute('data-theme', theme);
+            } else {
+                document.documentElement.removeAttribute('data-theme');
+            }
+            localStorage.setItem('theme', theme);
+            var btn = document.getElementById('theme-btn');
+            if (btn) btn.textContent = _themeLabels[theme] || theme;
+        }
+
+        function cycleTheme() {
+            var cur = _currentTheme();
+            var idx = (_themeOrder.indexOf(cur) + 1) % _themeOrder.length;
+            setTheme(_themeOrder[idx]);
+        }
+
+        // ----------------------------------------------------------------
         // API helpers
         // ----------------------------------------------------------------
-
         function apiUrl(path) {
-            if (path.startsWith("http")) return path;
-            if (!path.startsWith("/")) path = "/" + path;
+            if (path.startsWith('http')) return path;
+            if (!path.startsWith('/')) path = '/' + path;
             return window.location.origin + path;
         }
 
         async function fetchJson(url, opts) {
-            const res = await fetch(apiUrl(url), opts);
-            if (!res.ok) throw new Error(res.status + " " + res.statusText);
+            var res = await fetch(apiUrl(url), opts);
+            if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
             return res.json();
+        }
+
+        function escapeHtml(str) {
+            if (typeof str !== 'string') return '';
+            return str
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         // ----------------------------------------------------------------
         // Engine discovery
         // ----------------------------------------------------------------
+        var _knownEngines  = [];
+        var _loggedEngines = new Set();
 
-        var _knownEngines = [];
+        async function refreshEngineLoginLabels() {
+            if (!_knownEngines.length) return;
+            var requests = _knownEngines.map(async function(eng) {
+                try {
+                    var state = await fetchJson('/login/' + encodeURIComponent(eng.name) + '/state');
+                    if (state && state.logged_in) {
+                        _loggedEngines.add(eng.name);
+                    } else {
+                        _loggedEngines.delete(eng.name);
+                    }
+                } catch (_) {
+                    _loggedEngines.delete(eng.name);
+                }
+            });
+            await Promise.all(requests);
+            renderEnginesList();
+        }
 
         async function loadEngines() {
             try {
@@ -141,8 +455,10 @@
                     });
                 } catch (_2) { _knownEngines = []; }
             }
+
             renderEnginesList();
             populateEngineDropdowns();
+            refreshEngineLoginLabels();
         }
 
         function _sourceBadge(src) {
@@ -155,7 +471,7 @@
         function renderEnginesList() {
             var container = document.getElementById('engines-list');
             if (_knownEngines.length === 0) {
-                container.innerHTML = '<p style="color:#888;">No engines found.</p>';
+                container.innerHTML = '<p style="color:var(--text-dim);">No engines found.</p>';
                 return;
             }
             container.innerHTML = _knownEngines.map(function(eng) {
@@ -167,39 +483,37 @@
                 }
                 var aliases = (eng.aliases || []).filter(function(a) { return a !== eng.name; }).join(', ');
                 var fileLine = (eng.source_path && eng.source_path !== '<builtin>')
-                    ? '<div class="engine-meta" style="color:#aaa; font-size:0.76rem;"><b>File:</b> ' + eng.source_path + '</div>'
+                    ? '<div class="engine-meta" style="color:var(--text-dim); font-size:0.76rem;"><b>File:</b> ' + eng.source_path + '</div>'
+                    : '';
+                var loggedBadge = _loggedEngines.has(eng.name)
+                    ? '<span class="badge badge-logged">Logged</span>'
                     : '';
                 return '<div class="engine-card">'
-                    + '<h3>' + (eng.display_name || eng.name) + ' ' + _sourceBadge(eng.source) + '</h3>'
+                    + '<h3>' + (eng.display_name || eng.name) + ' '
+                    +   _sourceBadge(eng.source) + loggedBadge + '</h3>'
                     + '<div class="engine-meta"><b>ID:</b> <code>' + eng.name + '</code>'
                     + (aliases ? ' &nbsp;&bull;&nbsp; <b>Aliases:</b> ' + aliases : '') + '</div>'
-                    + '<div class="engine-meta"><b>URL:</b> <a href="' + (eng.service_url||'#') + '" target="_blank" rel="noopener">' + (eng.service_url||'—') + '</a></div>'
-                    + '<div class="engine-meta"><b>Models:</b> ' + (modelList||'—') + '</div>'
+                    + '<div class="engine-meta"><b>URL:</b> <a href="' + (eng.service_url||'#') + '" target="_blank" rel="noopener">' + (eng.service_url||'&mdash;') + '</a></div>'
+                    + '<div class="engine-meta"><b>Models:</b> ' + (modelList||'&mdash;') + '</div>'
+                    + (eng.notes ? '<div class="engine-meta"><b>Notes:</b> ' + escapeHtml(eng.notes) + '</div>' : '')
                     + fileLine
                     + '<div class="engine-actions">'
                     + '<button onclick="startLogin(\'' + eng.name + '\')">Login ' + (eng.display_name||eng.name) + '</button>'
-                    + '<button onclick="checkLoginState(\'' + eng.name + '\')">Check state</button>'
+                    + '<button id="check-btn-' + eng.name + '" onclick="checkLoginState(\'' + eng.name + '\', this)">Check state</button>'
                     + '<button onclick="selectEngineFor(\'' + eng.name + '\')">Select for prompt</button>'
-                    + '</div></div>';
+                    + '</div>'
+                    + '<div id="check-result-' + eng.name + '" class="check-result"></div>'
+                    + '</div>';
             }).join('');
         }
 
         function populateEngineDropdowns() {
             var select = document.getElementById('engine-select');
-            var histFilter = document.getElementById('history-engine-filter');
             var prevEngine = select.value;
-            var prevHistory = histFilter.value;
-
             select.innerHTML = _knownEngines.map(function(e) {
                 return '<option value="' + e.name + '">' + (e.display_name||e.name) + '</option>';
             }).join('');
             if (prevEngine) select.value = prevEngine;
-
-            histFilter.innerHTML = '<option value="">All engines</option>'
-                + _knownEngines.map(function(e) {
-                    return '<option value="' + e.name + '">' + (e.display_name||e.name) + '</option>';
-                }).join('');
-            if (prevHistory) histFilter.value = prevHistory;
         }
 
         function selectEngineFor(name) {
@@ -227,7 +541,6 @@
         // ----------------------------------------------------------------
         // Login
         // ----------------------------------------------------------------
-
         async function startLogin(engine) {
             var banner = document.getElementById('login-banner');
             banner.style.display = 'block';
@@ -241,52 +554,107 @@
             setTimeout(function() { banner.style.display = 'none'; }, 5000);
         }
 
-        async function checkLoginState(engine) {
+        async function checkLoginState(engineName, btnEl) {
+            var resultEl = document.getElementById('check-result-' + engineName);
+            var origText = btnEl.textContent;
+            btnEl.disabled = true;
+            btnEl.textContent = '\u21BB Checking\u2026';
+            if (resultEl) { resultEl.style.display = 'none'; resultEl.textContent = ''; }
             try {
-                var state = await fetchJson('/login/' + engine + '/state');
-                alert(engine + ' login state:\n' + JSON.stringify(state, null, 2));
+                var state = await fetchJson('/login/' + engineName + '/state');
+                if (state && state.logged_in) {
+                    _loggedEngines.add(engineName);
+                } else {
+                    _loggedEngines.delete(engineName);
+                }
+                renderEnginesList();
+
+                if (resultEl) {
+                    resultEl.textContent = JSON.stringify(state, null, 2);
+                    resultEl.style.display = 'block';
+                    setTimeout(function() { resultEl.style.display = 'none'; }, 8000);
+                }
             } catch (err) {
-                alert('Error: ' + err.message);
+                _loggedEngines.delete(engineName);
+                renderEnginesList();
+                if (resultEl) {
+                    resultEl.textContent = 'Error: ' + err.message;
+                    resultEl.style.display = 'block';
+                    setTimeout(function() { resultEl.style.display = 'none'; }, 8000);
+                }
+            } finally {
+                btnEl.disabled = false;
+                btnEl.textContent = origText;
             }
         }
 
         // ----------------------------------------------------------------
-        // Stats & reset
+        // Stats
         // ----------------------------------------------------------------
-
         async function refreshStats() {
             try {
                 var data = await fetchJson('/stats');
-                document.getElementById('stats').textContent = JSON.stringify(data, null, 2);
+                var s    = data.stats || {};
+                var req  = s.requests  || 0;
+                var resp = s.responses || 0;
+                var errs = s.errors    || 0;
+                var rate = req > 0 ? Math.round((resp / req) * 100) + '%' : '&mdash;';
+
+                document.getElementById('stat-requests').textContent  = req;
+                document.getElementById('stat-responses').textContent = resp;
+                document.getElementById('stat-errors').textContent    = errs;
+                document.getElementById('stat-rate').innerHTML        = rate;
+
+                var rt = data.response_time || {};
+                var globalAvg = rt.global_avg_ms;
+                if (globalAvg === null || globalAvg === undefined) {
+                    document.getElementById('stat-avg-ms').textContent = '&mdash;';
+                } else {
+                    document.getElementById('stat-avg-ms').textContent = Math.round(globalAvg) + ' ms';
+                }
+
+                var engineAvg = rt.per_engine_avg_ms || {};
+                if (Object.keys(engineAvg).length === 0) {
+                    document.getElementById('stat-per-engine-ms').innerHTML = '&mdash;';
+                } else {
+                    var entries = Object.keys(engineAvg).sort().map(function(engine) {
+                        var ms = engineAvg[engine];
+                        return engine + ': ' + (ms === null ? 'N/A' : Math.round(ms) + ' ms');
+                    });
+                    // Each engine on new line for clarity
+                    document.getElementById('stat-per-engine-ms').innerHTML = entries.join('<br>');
+                }
             } catch (err) {
-                document.getElementById('stats').textContent = 'Error: ' + err.message;
+                document.getElementById('stat-requests').textContent = 'Error';
             }
         }
 
         async function clearState() {
-            var apiOk = false, apiMsg = '';
             try {
                 var res = await fetchJson('/reset', { method: 'POST' });
-                apiOk = true; apiMsg = res.status + ' - ' + res.message;
+                document.getElementById('response-box').textContent = '\u2014';
+                alert('Reset: ' + res.status + ' \u2014 ' + res.message);
+                // Clear current stats while waiting for fresh data
+                document.getElementById('stat-requests').textContent = '&mdash;';
+                document.getElementById('stat-responses').textContent = '&mdash;';
+                document.getElementById('stat-errors').textContent = '&mdash;';
+                document.getElementById('stat-rate').textContent = '&mdash;';
+                document.getElementById('stat-avg-ms').textContent = '&mdash;';
+                document.getElementById('stat-per-engine-ms').innerHTML = '&mdash;';
             } catch (err) {
-                apiMsg = 'Reset call failed: ' + err.message;
-            } finally {
-                document.getElementById('response-box').textContent = '—';
-                document.getElementById('stats').textContent = apiOk ? 'State cleared.' : ('State cleared (UI only). ' + apiMsg);
+                alert('Reset failed: ' + err.message);
             }
-            if (apiOk) alert('Reset status: ' + apiMsg);
             refreshStats();
         }
 
         // ----------------------------------------------------------------
         // Prompt
         // ----------------------------------------------------------------
-
         async function sendPrompt() {
             var engine = document.getElementById('engine-select').value;
             if (!engine) { alert('Select an engine first.'); return; }
             var prompt = document.getElementById('prompt-input').value;
-            var box = document.getElementById('response-box');
+            var box    = document.getElementById('response-box');
             box.textContent = 'Waiting\u2026';
             try {
                 var res = await fetchJson('/engine/' + engine + '/prompt', {
@@ -298,58 +666,128 @@
             } catch (err) {
                 box.textContent = 'Error: ' + err.message;
             } finally {
-                refreshHistory();
+                refreshStats();
             }
         }
 
         // ----------------------------------------------------------------
-        // History
+        // App Logs — incremental polling
         // ----------------------------------------------------------------
+        var _lastLogSeq  = 0;
+        var _logPollTimer = null;
 
-        async function refreshHistory() {
-            var engine = document.getElementById('history-engine-filter').value;
-            var model  = document.getElementById('history-model-filter').value;
-            var status = document.getElementById('history-status-filter').value;
-            var params = new URLSearchParams({ limit: '200', engine: engine, model: model, status: status });
+        function _levelClass(level) {
+            if (level === 'ERROR' || level === 'CRITICAL') return 'log-ERROR';
+            if (level === 'WARNING')  return 'log-WARNING';
+            if (level === 'DEBUG')    return 'log-DEBUG';
+            return 'log-INFO';
+        }
+
+        async function pollAppLogs() {
+            var box = document.getElementById('log-content');
+            if (!box) return;
             try {
-                var entries = await fetchJson('/logs?' + params);
-                var el = document.getElementById('history-content');
-                if (!Array.isArray(entries)) { el.textContent = 'Failed to load history'; return; }
-                if (entries.length === 0)    { el.textContent = 'No history entries yet.'; return; }
-                el.innerHTML = entries.map(function(e) {
-                    var cls = e.status === 'ok' ? 'status-ok' : 'status-error';
-                    var safe = function(s) { return (s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
-                    return '<span class="' + cls + '">' + (e.status==='ok'?'&#x2705;':'&#x274C;') + '</span> '
-                        + '[' + e.created_at + '] ' + e.engine + '/' + e.model
-                        + ' (' + e.status + '/' + e.elapsed_ms + 'ms)\n'
-                        + 'Prompt: ' + safe(e.prompt) + '\nResponse: ' + safe(e.response) + '\n----\n';
-                }).join('');
-                var cb = document.getElementById('history-autoscroll');
-                if (cb && cb.checked) el.scrollTop = el.scrollHeight;
-            } catch (err) {
-                document.getElementById('history-content').textContent = 'Error: ' + err.message;
-            }
+                var data    = await fetchJson('/api/logs/app?since=' + _lastLogSeq);
+                var entries = data.entries || [];
+                if (entries.length > 0) {
+                    var frag = document.createDocumentFragment();
+                    entries.forEach(function(e) {
+                        var line = document.createElement('div');
+                        line.className = _levelClass(e.level);
+                        line.textContent = '[' + e.time + '] ' + e.level + ' ' + e.name + ': ' + e.msg;
+                        frag.appendChild(line);
+                    });
+                    box.appendChild(frag);
+                    _lastLogSeq = entries[entries.length - 1].seq;
+                    var cb = document.getElementById('log-autoscroll');
+                    if (cb && cb.checked) box.scrollTop = box.scrollHeight;
+                }
+            } catch (_) { /* silent */ }
         }
 
-        function setupAutoscroll() {
-            var cb = document.getElementById('history-autoscroll');
+        function startLogPolling() {
+            if (_logPollTimer !== null) return;
+            pollAppLogs();
+            _logPollTimer = setInterval(function() {
+                if (document.visibilityState !== 'hidden') pollAppLogs();
+            }, 2000);
+        }
+
+        function clearLogs() {
+            var box = document.getElementById('log-content');
+            if (box) box.innerHTML = '';
+        }
+
+        function setupLogAutoscroll() {
+            var cb = document.getElementById('log-autoscroll');
             if (!cb) return;
-            var saved = localStorage.getItem('history_autoscroll_enabled');
-            cb.checked = saved === null ? true : saved === 'true';
+            var saved = localStorage.getItem('log_autoscroll');
+            cb.checked = (saved === null) ? true : (saved === 'true');
             cb.addEventListener('change', function() {
-                localStorage.setItem('history_autoscroll_enabled', cb.checked ? 'true' : 'false');
+                localStorage.setItem('log_autoscroll', cb.checked ? 'true' : 'false');
             });
+        }
+
+        // ----------------------------------------------------------------
+        // Selector hints
+        // ----------------------------------------------------------------
+        async function refreshSelectorHints() {
+            var container = document.getElementById('selector-hints-content');
+            try {
+                var data    = await fetchJson('/api/engines/selector-hints');
+                var engines = data.data || {};
+                var names   = Object.keys(engines);
+                if (names.length === 0) {
+                    container.innerHTML = '<em class="hint-none">No active engine instances yet &mdash; send a prompt first.</em>';
+                    return;
+                }
+                function esc(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+                function selectorRow(label, cached, fullList) {
+                    if (!cached) {
+                        return '<tr><td><b>' + label + '</b></td>'
+                            + '<td colspan="2" class="hint-none">Not detected yet</td></tr>';
+                    }
+                    var pos  = fullList.indexOf(cached);
+                    var hint = (pos === 0)
+                        ? '<span class="hint-ok">&#x2705; Already at position 0 &mdash; optimal</span>'
+                        : '<span class="hint-warn">&#x26A0; Move to position 0 (currently at index '
+                          + pos + ') to save ~' + (pos * 1.5).toFixed(1) + 's per request</span>';
+                    return '<tr>'
+                        + '<td><b>' + esc(label) + '</b></td>'
+                        + '<td><code>' + esc(cached) + '</code></td>'
+                        + '<td>' + hint + '</td>'
+                        + '</tr>';
+                }
+                container.innerHTML = names.map(function(name) {
+                    var info = engines[name];
+                    return '<div class="engine-card" style="margin:8px 0;">'
+                        + '<h3>' + esc(name) + '</h3>'
+                        + '<table class="sel-table">'
+                        + '<thead><tr>'
+                        + '<th style="width:140px;">Selector type</th>'
+                        + '<th>Best selector found at runtime</th>'
+                        + '<th>JSON hint</th>'
+                        + '</tr></thead>'
+                        + '<tbody>'
+                        + selectorRow('Prompt area', info.prompt_selector, info.prompt_area_selectors || [])
+                        + selectorRow('Send button', info.send_selector,   info.send_button_selectors || [])
+                        + '</tbody></table>'
+                        + '</div>';
+                }).join('');
+            } catch(err) {
+                container.innerHTML = '<span style="color:var(--log-error);">Error: ' + err.message + '</span>';
+            }
         }
 
         // ----------------------------------------------------------------
         // Init
         // ----------------------------------------------------------------
-
         window.addEventListener('load', function() {
-            setupAutoscroll();
+            setTheme(_currentTheme());   // sync button label with stored value
+            setupLogAutoscroll();
             loadEngines();
             refreshStats();
-            refreshHistory();
+            startLogPolling();
         });
     </script>
 </body>

@@ -142,6 +142,37 @@ def get_stats() -> Dict[str, int]:
             conn.close()
 
 
+def clear_stats() -> None:
+    with DB_LOCK:
+        conn = _get_connection()
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute("DELETE FROM stats")
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                # Some environments may use a readonly DB; ignore if clearing stats fails.
+                # The UI still resets counters locally and the app remains functional.
+                print(f"Warning: cannot clear stats DB ({e})")
+        finally:
+            conn.close()
+
+
+def clear_prompt_logs() -> None:
+    with DB_LOCK:
+        conn = _get_connection()
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute("DELETE FROM prompt_logs")
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                # Some environments may use a readonly DB; ignore if clearing logs fails.
+                print(f"Warning: cannot clear prompt_logs DB ({e})")
+        finally:
+            conn.close()
+
+
 def get_response_time_stats() -> Dict[str, Any]:
     """Return average elapsed_ms per engine and global average in milliseconds."""
     with DB_LOCK:

@@ -15,6 +15,8 @@ from fastapi.responses import (
 )
 
 from db.db import (
+    clear_prompt_logs,
+    clear_stats,
     get_logged_engines,
     get_prompt_logs,
     get_response_time_stats,
@@ -576,6 +578,10 @@ async def reset_state() -> Dict[str, Any]:
         manager.engines.clear()
         manager.active_engine = None
         rate_limit_store.clear()
+
+        # Clear any runtime counters in DB so stats UI also resets
+        clear_stats()
+        clear_prompt_logs()
 
         message = (
             "Engine state cleared"

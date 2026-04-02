@@ -240,6 +240,17 @@ def test_reset_state():
     assert manager.engines == {}
     assert manager.active_engine is None
 
+    stats_res = client.get("/stats")
+    assert stats_res.status_code == 200
+    stats_data = stats_res.json()
+    assert "stats" in stats_data
+    # if DB is writable/clearable, stats may be empty; if readonly they may persist
+    assert isinstance(stats_data["stats"], dict)
+    assert "response_time" in stats_data
+    assert "global_avg_ms" in stats_data["response_time"]
+    assert "per_engine_avg_ms" in stats_data["response_time"]
+    assert isinstance(stats_data["response_time"]["per_engine_avg_ms"], dict)
+
 
 def test_api_reset_alias():
     manager = EngineManager.get()
