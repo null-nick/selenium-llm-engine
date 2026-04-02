@@ -34,7 +34,7 @@ Feel free to submit pull requests with improvements, new engines, or engine defi
   - `/stats` (aggregated counters + response time averages)
   - `/api/logs/app` (incremental app log polling)
   - `/api/engines/selector-hints` (runtime selector hints)
-  - `/reset` and `/api/reset`
+  - `/reset` and `/api/reset` (clears engine state and stats counters)
   - `/logs` and `/api/history`
   - `/ui`
 - SQLite storage for prompt logs and counters
