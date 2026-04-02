@@ -25,6 +25,19 @@ This document defines the expected behavior of agents working on this repository
 
 6. Never `git commit` or `git add` if not explicitly requested.
 
+7. Engine agnosticism — strictly enforced
+   - The `core/` package **must not** contain any reference to a specific engine
+     (e.g. `chatgpt`, `gemini`, `copilot`, `grok`, `perplexity`, or any other
+     named LLM service).
+   - All engine-specific data (selectors, URLs, models, aliases) belongs
+     **exclusively** in the `engines/` directory as `.json` or `.py` files.
+   - There is **no built-in engine fallback**: if `engines/` is empty the
+     manager starts with no engines and logs a warning. Do not re-introduce a
+     fallback list.
+   - Docstring examples in `core/` must use placeholder names (e.g.
+     `"my-engine"`) rather than real engine names.
+   - Any violation of this rule is a bug and must be fixed immediately.
+
 ## Mandatory checks during review
 - `ruff check .` must pass.
 - If the change involves APIs, add request tests with valid and invalid payloads.
