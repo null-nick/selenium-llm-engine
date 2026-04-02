@@ -328,3 +328,181 @@ def test_v1_streaming_sse_format():
         chunk = json.loads(line.removeprefix("data:").strip())
         assert chunk["object"] == "chat.completion.chunk"
         assert "choices" in chunk
+
+
+# ---------------------------------------------------------------------------
+# Selector hints endpoint and selector caching regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_selector_hints_empty_when_no_prompts():
+    """GET /api/engines/selector-hints returns an empty data dict before any prompt is sent."""
+    mgr = EngineManager.get()
+    mgr.engines.clear()
+    response = client.get("/api/engines/selector-hints")
+    assert response.status_code == 200
+    data = response.json()
+    assert "data" in data
+    assert data["data"] == {}
+
+
+def test_selector_hints_structure_after_engine_loaded():
+    """Once an engine instance is in the manager the hints endpoint must expose its selector lists."""
+    engine = DummyEngine()
+    engine.prompt_area_selectors = ["textarea", "div[contenteditable='true']"]
+    engine.send_button_selectors = ["button[type='submit']", "button[aria-label*='Send']"]
+    engine._cached_prompt_selector = None
+    engine._cached_send_selector = None
+
+    mgr = EngineManager.get()
+    mgr.engines["chatgpt"] = engine
+
+    response = client.get("/api/engines/selector-hints")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert "chatgpt" in data
+    hints = data["chatgpt"]
+    assert "prompt_selector" in hints
+    assert "send_selector" in hints
+    assert "prompt_area_selectors" in hints
+    assert "send_button_selectors" in hints
+    assert hints["prompt_selector"] is None
+    assert hints["send_selector"] is None
+    assert hints["prompt_area_selectors"] == engine.prompt_area_selectors
+    assert hints["send_button_selectors"] == engine.send_button_selectors
+
+
+def test_selector_hints_reflect_cached_values():
+    """Cached selectors are included in the hints response after being set."""
+    engine = DummyEngine()
+    engine.prompt_area_selectors = ["textarea", "div[contenteditable='true']"]
+    engine.send_button_selectors = ["button[type='submit']", "button[aria-label*='Send']"]
+    engine._cached_prompt_selector = "div[contenteditable='true']"
+    engine._cached_send_selector = "button[aria-label*='Send']"
+
+    mgr = EngineManager.get()
+    mgr.engines["gemini"] = engine
+
+    response = client.get("/api/engines/selector-hints")
+    assert response.status_code == 200
+    hints = response.json()["data"]["gemini"]
+    assert hints["prompt_selector"] == "div[contenteditable='true']"
+    assert hints["send_selector"] == "button[aria-label*='Send']"
+
+
+def test_find_interactable_element_caches_selector():
+    """_find_interactable_element sets cache_attr to the found selector."""
+    try:
+        from core.selenium_llm_base import SeleniumLLMBase
+    except ModuleNotFoundError:
+        pytest.skip("undetected_chromedriver not compatible with this Python version")
+
+    from unittest.mock import MagicMock, patch
+
+    base = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    assert base._cached_prompt_selector is None
+
+    mock_driver = MagicMock()
+    fake_el = MagicMock()
+
+    winning_selector = "div[contenteditable='true']"
+
+    def fake_wait_until(condition):
+        # Simulate: first selector times out, second succeeds
+        sel = condition.locator[1]
+        if sel == winning_selector:
+            return fake_el
+        from selenium.common.exceptions import TimeoutException
+        raise TimeoutException()
+
+    mock_wait = MagicMock()
+    mock_wait.until.side_effect = fake_wait_until
+
+    def make_wait(driver, timeout):
+        return mock_wait
+
+    with patch("core.selenium_llm_base.WebDriverWait", side_effect=make_wait):
+        selectors = ["textarea", winning_selector]
+        result = base._find_interactable_element(
+            mock_driver, selectors, timeout=3.0, cache_attr="_cached_prompt_selector"
+        )
+
+    assert result == fake_el
+    assert base._cached_prompt_selector == winning_selector
+
+
+def test_find_interactable_element_tries_cached_first():
+    """When a cached selector exists it is tried before others."""
+    try:
+        from core.selenium_llm_base import SeleniumLLMBase
+    except ModuleNotFoundError:
+        pytest.skip("undetected_chromedriver not compatible with this Python version")
+
+    from unittest.mock import MagicMock, patch
+
+    base = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    cached_sel = "div[contenteditable='true']"
+    base._cached_prompt_selector = cached_sel
+
+    tried_order: list[str] = []
+    fake_el = MagicMock()
+
+    def fake_wait_until(condition):
+        sel = condition.locator[1]
+        tried_order.append(sel)
+        if sel == cached_sel:
+            return fake_el
+        from selenium.common.exceptions import TimeoutException
+        raise TimeoutException()
+
+    mock_wait = MagicMock()
+    mock_wait.until.side_effect = fake_wait_until
+
+    with patch("core.selenium_llm_base.WebDriverWait", return_value=mock_wait):
+        selectors = ["textarea", cached_sel, "input"]
+        base._find_interactable_element(
+            MagicMock(), selectors, timeout=3.0, cache_attr="_cached_prompt_selector"
+        )
+
+    assert tried_order[0] == cached_sel, "Cached selector must be tried first"
+
+
+# ---------------------------------------------------------------------------
+# New endpoints: /api/logs/app and updated /stats
+# ---------------------------------------------------------------------------
+
+
+def test_app_logs_endpoint_returns_list():
+    """GET /api/logs/app must return a JSON object with an 'entries' list."""
+    response = client.get("/api/logs/app")
+    assert response.status_code == 200
+    data = response.json()
+    assert "entries" in data
+    assert isinstance(data["entries"], list)
+
+
+def test_app_logs_since_parameter():
+    """Passing since=<large_int> must return only newer entries (or an empty list)."""
+    response = client.get("/api/logs/app?since=999999")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["entries"] == []
+
+
+def test_stats_includes_logged_engines():
+    """GET /stats must include a 'logged_engines' list instead of 'latest_logs'."""
+    response = client.get("/stats")
+    assert response.status_code == 200
+    data = response.json()
+    assert "stats" in data
+    assert "logged_engines" in data
+    assert isinstance(data["logged_engines"], list)
+    assert "latest_logs" not in data
