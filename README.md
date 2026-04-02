@@ -43,28 +43,39 @@ Feel free to submit pull requests with improvements, new engines, or engine defi
 
 ## Quickstart
 
-1. Build and run with Docker compose:
+The easiest way to run Selenium LLM Engine is to pull the Docker image from Docker Hub.
+
+1. Pull image and run with Docker:
 
 ```bash
-docker compose up --build
+docker pull xargonwan/selenium-llm-engine:latest
+
+docker run -d --name selenium-llm-engine \
+  -p 14848:8000 \
+  -p 3006:3000 \
+  -v data:/app/data \
+  -v config:/config \
+  xargonwan/selenium-llm-engine:latest
 ```
 
-2. API access:
+2. Verify service is running:
 
 - `http://localhost:14848/api/ping`
 - `http://localhost:14848/models`
 
 > [!NOTE]
-> model discovery is dynamic. Although examples use `chatgpt`, `gemini`, `stepfun`, `calude`, the available engines are those present in `engines/` and reported by `/models`.
+> Model discovery is dynamic. Although examples use `chatgpt`, `gemini`, `stepfun`, `claude`, the available engines are those present in `engines/` and reported by `/models`.
+
+3. OpenAI-compatible endpoints:
 
 - `http://localhost:14848/chatgpt/prompt`
 - `http://localhost:14848/gemini/prompt`
 - `http://localhost:14848/stepfun/prompt`
-- `http://localhost:14848/calude/prompt`
-- `http://localhost:14848/v1/chat/completions` (OpenAI-compatible)
+- `http://localhost:14848/claude/prompt`
+- `http://localhost:14848/v1/chat/completions`
 - `http://localhost:14848/ui`
 
-2.1 OpenAPI / OpenAI client
+4. OpenAPI / OpenAI client
 
 This application exposes an OpenAI-compatible endpoint for clients and SDKs:
 
@@ -139,6 +150,18 @@ Example response:
 
 - `POST http://localhost:14848/login/chatgpt`
 - `POST http://localhost:14848/login/gemini`
+
+## Local build (from source)
+
+If you want to build locally from this repository, use Docker Compose:
+
+```bash
+git clone https://github.com/XargonWan/selenium-llm-engine.git
+cd selenium-llm-engine
+docker compose up --build
+```
+
+This runs the same service under `http://localhost:14848` (and `http://localhost:3006` for webtop).
 
 ## Notes
 

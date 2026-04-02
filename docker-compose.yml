@@ -1,9 +1,8 @@
 services:
   selenium-llm-engine:
-    build: .
+    # build: . # If you want to build from source, uncomment this and comment out the image line
+    image: xargonwan/selenium-llm-engine:latest
     container_name: selenium-llm-engine
-    environment:
-      - CHROMIUM_HEADLESS=0  # default non-headless; set to 1 to enable headless mode
     ports:
       - "14848:8000"  # API port
       - "3006:3000"   # webtop interface
