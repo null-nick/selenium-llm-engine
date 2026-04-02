@@ -6,7 +6,7 @@
 ![Docker Pulls](https://img.shields.io/docker/pulls/xargonwan/selenium-llm-engine)
 | Branch    | Build Status                                                                                                                                         | Docs Status                                                                                                                                      |
 |-----------|------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-| `main`    | [![CI Status](https://img.shields.io/github/actions/workflow/status/xargonwan/selenium-llm-engine/build-release.yml)](https://github.com/xargonwan/selenium-llm-engine/actions)
+| `main`    | [![CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/selenium-llm-engine/build-and-publish.yml)](https://github.com/xargonwan/selenium-llm-engine/actions)
 
 This repository provides a standalone, Docker-friendly Selenium-powered LLM engine proxy. It automates browser access to Web GPTs via Selenium to expose a simple OpenAI-compatible API and web admin UI.
 
