@@ -140,3 +140,43 @@ def get_stats() -> Dict[str, int]:
             return {row[0]: row[1] for row in cur.fetchall()}
         finally:
             conn.close()
+
+
+def get_response_time_stats() -> Dict[str, Any]:
+    """Return average elapsed_ms per engine and global average in milliseconds."""
+    with DB_LOCK:
+        conn = _get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT AVG(elapsed_ms) AS avg_ms FROM prompt_logs WHERE elapsed_ms IS NOT NULL"
+            )
+            row = cur.fetchone()
+            global_avg = row[0] if row and row[0] is not None else None
+
+            cur.execute(
+                "SELECT engine, AVG(elapsed_ms) AS avg_ms, COUNT(*) AS count "
+                "FROM prompt_logs WHERE elapsed_ms IS NOT NULL GROUP BY engine ORDER BY engine"
+            )
+            per_engine = {
+                r[0]: float(r[1]) if r[1] is not None else None for r in cur.fetchall()
+            }
+
+            return {
+                "global_avg_ms": float(global_avg) if global_avg is not None else None,
+                "per_engine_avg_ms": per_engine,
+            }
+        finally:
+            conn.close()
+
+
+def get_logged_engines() -> List[str]:
+    """Return the list of distinct engine names that have at least one prompt log."""
+    with DB_LOCK:
+        conn = _get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT engine FROM prompt_logs ORDER BY engine")
+            return [row[0] for row in cur.fetchall()]
+        finally:
+            conn.close()

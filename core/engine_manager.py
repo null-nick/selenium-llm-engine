@@ -20,10 +20,8 @@ Python definition (required for complex / custom logic)
 Both file types can coexist — a ``.py`` engine with the same name as a
 ``.json`` engine is ignored (JSON takes precedence).
 
-Backward compatibility
-    If no ``engines/`` directory exists the manager falls back to the
-    hard-coded ChatGPT / Gemini engines so that existing deployments continue
-    to work without any changes.
+If no ``engines/`` directory exists (or it is empty), the manager starts
+with no engines registered and logs a warning.
 """
 
 from __future__ import annotations
@@ -62,12 +60,13 @@ class EngineDescriptor:
     service_url: str
     models: dict[str, int]
     default_model: str
-    source: str  # "json" | "python" | "builtin"
-    source_path: str  # filesystem path or "<builtin>"
+    source: str  # "json" | "python"
+    source_path: str  # filesystem path
     allow_unlogged: bool = False
+    notes: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "name": self.name,
             "display_name": self.display_name,
             "aliases": self.aliases,
@@ -78,6 +77,9 @@ class EngineDescriptor:
             "source": self.source,
             "source_path": self.source_path,
         }
+        if self.notes:
+            data["notes"] = self.notes
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +103,7 @@ def _scan_json(path: Path) -> Optional[EngineDescriptor]:
             models=dict(cfg.get("models", {"default": 10000})),
             default_model=cfg.get("default_model", "default"),
             allow_unlogged=bool(cfg.get("allow_unlogged", False)),
+            notes=cfg.get("notes"),
             source="json",
             source_path=str(path),
         )
@@ -225,195 +228,9 @@ def _instantiate(descriptor: EngineDescriptor, **kwargs) -> "SeleniumLLMBase":
             f"{descriptor.source_path}"
         )
 
-    if descriptor.source == "builtin":
-        return _builtin_instance(descriptor.name, **kwargs)
-
     raise ValueError(f"Unknown engine source type: {descriptor.source!r}")
 
 
-def _builtin_descriptors() -> dict[str, EngineDescriptor]:
-    """Hard-coded fallback used when no ``engines/`` directory exists."""
-    chatgpt = EngineDescriptor(
-        name="chatgpt",
-        aliases=["chatgpt", "openai", "gpt"],
-        display_name="ChatGPT (OpenAI)",
-        service_url="https://chat.openai.com",
-        models={
-            "gpt-4o": 60000,
-            "gpt-4o-mini": 60000,
-            "gpt-4-turbo": 50000,
-            "gpt-4": 40000,
-            "gpt-3.5-turbo": 30000,
-            "unlogged": 20000,
-            "default": 51000,
-        },
-        default_model="gpt-4o",
-        source="builtin",
-        source_path="<builtin>",
-        allow_unlogged=True,
-    )
-    gemini = EngineDescriptor(
-        name="gemini",
-        aliases=["gemini", "google"],
-        display_name="Gemini (Google)",
-        service_url="https://gemini.google.com",
-        models={
-            "2.5-flash": 32000,
-            "2.0-flash": 32000,
-            "1.5-flash": 100000,
-            "1.5-pro": 500000,
-            "unlogged": 21500,
-            "default": 32000,
-        },
-        default_model="2.5-flash",
-        source="builtin",
-        source_path="<builtin>",
-        allow_unlogged=True,
-    )
-    result: dict[str, EngineDescriptor] = {"chatgpt": chatgpt, "gemini": gemini}
-    for alias in chatgpt.aliases:
-        result.setdefault(alias, chatgpt)
-    for alias in gemini.aliases:
-        result.setdefault(alias, gemini)
-    return result
-
-
-# Hardcoded JSON configs for built-in engines (used when engines/ dir missing).
-_BUILTIN_CONFIGS: dict[str, dict] = {
-    "chatgpt": {
-        "name": "chatgpt",
-        "display_name": "ChatGPT (OpenAI)",
-        "aliases": ["chatgpt", "openai", "gpt"],
-        "service_url": "https://chat.openai.com",
-        "default_model": "gpt-4o",
-        "allow_unlogged": True,
-        "models": {
-            "gpt-4o": 60000,
-            "gpt-4o-mini": 60000,
-            "gpt-4-turbo": 50000,
-            "gpt-4": 40000,
-            "gpt-3.5-turbo": 30000,
-            "unlogged": 20000,
-            "default": 51000,
-        },
-        "selectors": {
-            "prompt_area": [
-                "div[data-testid='prompt-textarea'][contenteditable='true']",
-                "div.ProseMirror[contenteditable='true']",
-                "div.ProseMirror",
-                "#prompt-textarea",
-                "textarea[data-testid='prompt-textarea']",
-                "div[contenteditable='true'][data-placeholder]",
-                "textarea",
-                "div[contenteditable='true']",
-            ],
-            "send_button": [
-                "button[data-testid='send-button']",
-                "#composer-submit-button",
-                "button[aria-label='Send prompt']",
-                "button[aria-label*='Send']",
-            ],
-            "response_area": [
-                "[data-message-author-role='assistant']",
-                "div.markdown.prose",
-                "div.markdown",
-                ".agent-turn",
-            ],
-            "stop": [
-                "button[data-testid='stop-button']",
-                "button[aria-label='Stop generating']",
-                "button[aria-label*='Stop']",
-            ],
-        },
-        "login_detection": {
-            "url_prefix": "https://chat.openai.com",
-            "url_deny_keywords": ["login", "auth", "signin"],
-            "login_button_xpath": "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in')]",
-            "authenticated_css_selectors": [
-                "div[data-testid='conversation-panel']",
-                "div[data-testid='chat-history']",
-                "div[data-testid='disabled-service']",
-            ],
-        },
-    },
-    "gemini": {
-        "name": "gemini",
-        "display_name": "Gemini (Google)",
-        "aliases": ["gemini", "google"],
-        "service_url": "https://gemini.google.com",
-        "default_model": "2.5-flash",
-        "allow_unlogged": True,
-        "models": {
-            "2.5-flash": 32000,
-            "2.0-flash": 32000,
-            "1.5-flash": 100000,
-            "1.5-pro": 500000,
-            "unlogged": 21500,
-            "default": 32000,
-        },
-        "selectors": {
-            "prompt_area": [
-                "div[contenteditable='true'][data-placeholder]",
-                "div[contenteditable='true'][aria-label*='Ask']",
-                "div[contenteditable='true'][aria-label*='Message']",
-                "div.ql-editor[contenteditable='true']",
-                "textarea[placeholder*='Ask']",
-                "div[contenteditable='true']",
-                "textarea",
-            ],
-            "send_button": [
-                "button[aria-label='Send message']",
-                "button[aria-label*='Send message']",
-                "button[data-testid='send-button']",
-                "button[aria-label*='Send']",
-                "button[type='submit']",
-            ],
-            "response_area": [
-                "model-response .markdown",
-                "model-response",
-                ".model-response",
-                ".response-container",
-                "message-content",
-                ".message-content",
-                "div[class*='response-text']",
-            ],
-            "stop": [
-                "button[aria-label='Stop response']",
-                "button[aria-label='Cancel']",
-                "button[aria-label*='Stop']",
-                ".stop-button",
-                "[data-testid='stop-button']",
-            ],
-        },
-        "login_detection": {
-            "url_prefix": "https://gemini.google.com",
-            "url_deny_keywords": ["signin", "login"],
-            "login_button_xpath": "//button[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'login')]",
-            "authenticated_css_selectors": [
-                "div.assistant-message",
-                ".gemini-response",
-                ".chat-message.ai",
-            ],
-        },
-    },
-}
-
-
-def _builtin_instance(name: str, **kwargs) -> "SeleniumLLMBase":
-    """Instantiate a built-in engine without requiring the engines/ directory."""
-    from core.json_engine import JsonEngine
-
-    canonical = name.strip().lower()
-    # Resolve any well-known alias
-    alias_map = {
-        "openai": "chatgpt",
-        "gpt": "chatgpt",
-        "google": "gemini",
-    }
-    canonical = alias_map.get(canonical, canonical)
-    if canonical not in _BUILTIN_CONFIGS:
-        raise ValueError(f"Unknown built-in engine: {name}")
-    return JsonEngine(_BUILTIN_CONFIGS[canonical], **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -450,10 +267,9 @@ class EngineManager:
 
         raw = scan_engines(_ENGINES_DIR)
         if not raw:
-            logger.info(
-                "[engine_manager] No engines found in engines/ — using built-in fallback"
+            logger.warning(
+                "[engine_manager] No engines found in engines/ — no engines registered"
             )
-            raw = _builtin_descriptors()
 
         for desc in raw.values():
             if desc.name in self._descriptors:

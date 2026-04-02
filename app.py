@@ -1,9 +1,11 @@
+import asyncio
 import json
 import logging
+import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Set
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import (
@@ -13,7 +15,9 @@ from fastapi.responses import (
 )
 
 from db.db import (
+    get_logged_engines,
     get_prompt_logs,
+    get_response_time_stats,
     get_stats,
     init_database,
     log_prompt,
@@ -23,7 +27,43 @@ from db.db import (
 )
 from core.engine_manager import EngineManager
 
+# ---------------------------------------------------------------------------
+# In-memory application log buffer (survives for the process lifetime)
+# ---------------------------------------------------------------------------
+
+_LOG_BUFFER: deque[Dict[str, Any]] = deque(maxlen=500)
+_LOG_SEQ = 0
+_LOG_BUFFER_LOCK = threading.Lock()
+
+
+class _BufferHandler(logging.Handler):
+    """Appends log records to the in-memory ring buffer."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        global _LOG_SEQ
+        try:
+            with _LOG_BUFFER_LOCK:
+                _LOG_SEQ += 1
+                _LOG_BUFFER.append(
+                    {
+                        "seq": _LOG_SEQ,
+                        "time": self.formatTime(record, "%H:%M:%S"),
+                        "level": record.levelname,
+                        "name": record.name,
+                        "msg": self.format(record),
+                    }
+                )
+        except Exception:
+            self.handleError(record)
+
+
+_buf_handler = _BufferHandler()
+_buf_handler.setLevel(logging.DEBUG)
+
 logging.basicConfig(level=logging.INFO)
+# Attach after basicConfig so the root logger already exists
+logging.getLogger().addHandler(_buf_handler)
+
 logger = logging.getLogger("selenium-llm-api")
 
 app = FastAPI(title="Selenium LLM Engine", version="0.1")
@@ -48,6 +88,33 @@ def _rate_limit_exceeded(request: Request) -> bool:
         return True
     rate_limit_store[key].append(now)
     return False
+
+
+# Reset/state coordination helpers
+RESET_IN_PROGRESS = False
+IN_FLIGHT_TASKS: Set[asyncio.Task] = set()
+
+
+def _register_task(task: asyncio.Task) -> None:
+    IN_FLIGHT_TASKS.add(task)
+
+
+def _unregister_task(task: asyncio.Task) -> None:
+    IN_FLIGHT_TASKS.discard(task)
+
+
+async def _cancel_inflight_tasks() -> None:
+    tasks = list(IN_FLIGHT_TASKS)
+    if not tasks:
+        return
+    for t in tasks:
+        t.cancel()
+    try:
+        # Wait for cancel to propagate (including exceptions raised on cancellation)
+        await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception:
+        pass
+    IN_FLIGHT_TASKS.clear()
 
 
 async def _safe_parse_json(request: Request) -> Dict[str, Any]:
@@ -340,6 +407,12 @@ async def _prompt(
     model_name: str = "default",
     stream: bool = False,
 ) -> Any:
+    if RESET_IN_PROGRESS:
+        raise HTTPException(
+            status_code=503,
+            detail="Service is resetting; please retry after a moment",
+        )
+
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
 
@@ -359,6 +432,10 @@ async def _prompt(
 
     if not isinstance(prompt_text, str):
         prompt_text = str(prompt_text)
+
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        _register_task(current_task)
 
     inc_requests()
     start = time.time()
@@ -415,6 +492,18 @@ async def _prompt(
             duration_ms,
         )
 
+    except asyncio.CancelledError:
+        duration_ms = int((time.time() - start) * 1000)
+        log_prompt(
+            engine_name,
+            "unknown",
+            prompt_text,
+            "cancelled due to reset",
+            "error",
+            duration_ms,
+        )
+        inc_errors()
+        raise HTTPException(status_code=503, detail="Request cancelled due to reset")
     except HTTPException:
         raise
     except Exception as e:
@@ -422,30 +511,86 @@ async def _prompt(
         log_prompt(engine_name, "unknown", prompt_text, str(e), "error", duration_ms)
         inc_errors()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if current_task is not None:
+            _unregister_task(current_task)
 
 
 @app.get("/stats")
 async def stats() -> Dict[str, Any]:
-    return {"stats": get_stats(), "latest_logs": get_prompt_logs(20)}
+    return {
+        "stats": get_stats(),
+        "logged_engines": get_logged_engines(),
+        "response_time": get_response_time_stats(),
+    }
+
+
+@app.get("/api/logs/app")
+async def app_logs(since: int = 0) -> Dict[str, Any]:
+    """Return application log entries with seq > since (incremental polling)."""
+    with _LOG_BUFFER_LOCK:
+        entries = [e for e in _LOG_BUFFER if e["seq"] > since]
+    return {"entries": entries}
+
+
+@app.get("/api/engines/selector-hints")
+async def selector_hints() -> Dict[str, Any]:
+    """Return runtime-discovered best selectors for all active engine instances.
+
+    Only engines that have processed at least one prompt will have cached
+    selector data.  The UI can use this to suggest JSON reordering.
+    """
+    mgr = EngineManager.get()
+    data: Dict[str, Any] = {}
+    for name, engine in mgr.engines.items():
+        data[name] = {
+            "prompt_selector": getattr(engine, "_cached_prompt_selector", None),
+            "send_selector": getattr(engine, "_cached_send_selector", None),
+            "prompt_area_selectors": getattr(engine, "prompt_area_selectors", []),
+            "send_button_selectors": getattr(engine, "send_button_selectors", []),
+        }
+    return {"data": data}
 
 
 @app.post("/reset")
 async def reset_state() -> Dict[str, Any]:
+    global RESET_IN_PROGRESS
     manager = EngineManager.get()
     errors: list[str] = []
+
+    RESET_IN_PROGRESS = True
     try:
-        await manager.stop_all()
-    except Exception as e:
-        logger.warning(f"[reset] stop_all error (continuing): {e}")
-        errors.append(str(e))
-    manager.engines.clear()
-    manager.active_engine = None
-    message = (
-        "Engine state cleared"
-        if not errors
-        else f"Engine state cleared (with errors: {'; '.join(errors)})"
-    )
-    return {"status": "ok", "message": message}
+        # Cancel in-flight prompt handlers (soft cancellation)
+        try:
+            await _cancel_inflight_tasks()
+        except Exception as e:
+            logger.warning(f"[reset] cancel_inflight_tasks error: {e}")
+            errors.append(f"cancel: {e}")
+
+        try:
+            await manager.stop_all()
+        except Exception as e:
+            logger.warning(f"[reset] stop_all error (continuing): {e}")
+            errors.append(f"stop_all: {e}")
+
+        manager.engines.clear()
+        manager.active_engine = None
+        rate_limit_store.clear()
+
+        message = (
+            "Engine state cleared"
+            if not errors
+            else f"Engine state cleared (with errors: {'; '.join(errors)})"
+        )
+        return {"status": "ok", "message": message}
+
+    finally:
+        RESET_IN_PROGRESS = False
+
+
+@app.post("/api/reset")
+async def api_reset_state() -> Dict[str, Any]:
+    return await reset_state()
 
 
 @app.get("/logs")

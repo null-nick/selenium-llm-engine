@@ -72,6 +72,16 @@ class SeleniumLLMBase:
         # CSS selectors whose matching elements must never be clicked as send button
         self.send_button_blacklist: list[str] = []
 
+        # Cloudflare CAPTCHA challenge detectors
+        self.captcha_challenge_selectors: list[str] = [
+            "iframe#cf-chl-widget-ezspn",
+            "iframe[src*='challenges.cloudflare.com/cdn-cgi/challenge-platform']",
+        ]
+
+        # Selector cache: remember the last working selector to try it first
+        self._cached_prompt_selector: Optional[str] = None
+        self._cached_send_selector: Optional[str] = None
+
     def get_supported_models(self) -> list[str]:
         return list(self.model_limits_map.keys())
 
@@ -191,8 +201,6 @@ class SeleniumLLMBase:
             "--disable-gpu",
             "--disable-extensions",
             "--disable-plugins",
-            "--disable-images",
-            "--disable-javascript",
             "--disable-web-security",
             "--allow-running-insecure-content",
             "--disable-features=VizDisplayCompositor",
@@ -280,7 +288,7 @@ class SeleniumLLMBase:
                 )
                 self._cleanup_chromium_remnants()
                 if attempt < max_retries - 1:
-                    time.sleep(3)
+                    time.sleep(1)
 
         if self.driver is None:
             # Fallback: standard webdriver (no anti-detection patching)
@@ -331,8 +339,8 @@ class SeleniumLLMBase:
                 except Exception:
                     pass
 
-            # Wait for processes to terminate (SyntH waits 5s)
-            time.sleep(5)
+            # Wait for processes to terminate
+            time.sleep(2)
             logger.info("[selenium] Chromium processes killed")
 
             # Clean up temp dir lock files
@@ -371,7 +379,7 @@ class SeleniumLLMBase:
                         except Exception:
                             pass
 
-            time.sleep(2)
+            time.sleep(0.5)
             logger.info("[selenium] Chromium cleanup completed")
         except Exception as e:
             logger.warning(f"[selenium] Error during Chromium cleanup: {e}")
@@ -466,6 +474,18 @@ class SeleniumLLMBase:
         self._initialized = False
         self._cleanup_chromium_remnants()
 
+    def _is_captcha_present(self, driver: Any) -> bool:
+        """Return True if the page includes a known Cloudflare captcha challenge widget."""
+        for selector in self.captcha_challenge_selectors:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, selector)
+                if els:
+                    logger.debug(f"[selenium] Captcha selector matched: {selector}")
+                    return True
+            except Exception:
+                pass
+        return False
+
     # ------------------------------------------------------------------ core flow
 
     def _sync_generate_response(self, prompt: str) -> str:
@@ -497,20 +517,39 @@ class SeleniumLLMBase:
         assert self.driver is not None, "_ensure_ready() must have set self.driver"
         driver = cast(webdriver.Chrome, self.driver)
 
+        # Skip navigation if already on the service page (avoids full page reload)
+        needs_nav = True
         try:
-            driver.get(self.service_url)
-        except Exception as nav_err:
-            if self._is_dead_session(nav_err):
-                self._reset_driver()
-                raise RuntimeError(
-                    f"Driver session died during navigation: {nav_err}"
-                ) from nav_err
-            raise
-        time.sleep(2)
+            current_url = driver.current_url or ""
+            if current_url.startswith(self.service_url):
+                needs_nav = False
+                logger.debug("[selenium] Already on service URL, skipping navigation")
+        except Exception:
+            pass  # dead session or no URL — navigate anyway
+
+        if needs_nav:
+            try:
+                driver.get(self.service_url)
+            except Exception as nav_err:
+                if self._is_dead_session(nav_err):
+                    self._reset_driver()
+                    raise RuntimeError(
+                        f"Driver session died during navigation: {nav_err}"
+                    ) from nav_err
+                raise
+            time.sleep(0.5)
+
+        if self._is_captcha_present(driver):
+            logger.warning("[selenium] Cloudflare captcha challenge detected on page")
+            return (
+                "⚠️ Cloudflare CAPTCHA rilevato. "
+                "Per favore completa il CAPTCHA nella pagina e riprova." 
+            )
 
         try:
             input_el = self._find_interactable_element(
-                driver, self.prompt_area_selectors, timeout=20.0
+                driver, self.prompt_area_selectors, timeout=20.0,
+                cache_attr="_cached_prompt_selector",
             )
             if input_el is None:
                 raise RuntimeError("Could not find prompt input area")
@@ -548,15 +587,29 @@ class SeleniumLLMBase:
         driver: Any,
         selectors: list[str],
         timeout: float = 20.0,
+        cache_attr: Optional[str] = None,
     ) -> Optional[Any]:
-        """Try CSS selectors in order; return first element that is clickable."""
-        per = max(1.5, timeout / max(len(selectors), 1))
-        for sel in selectors:
+        """Try CSS selectors in order; return first element that is clickable.
+
+        If *cache_attr* is given (e.g. ``'_cached_prompt_selector'``), the last
+        successful selector is tried first on subsequent calls.
+        """
+        # Build an ordered list: cached selector first (if valid), then the rest
+        ordered: list[str] = list(selectors)
+        cached: Optional[str] = getattr(self, cache_attr, None) if cache_attr else None
+        if cached and cached in ordered:
+            ordered.remove(cached)
+            ordered.insert(0, cached)
+
+        per = max(1.5, timeout / max(len(ordered), 1))
+        for sel in ordered:
             try:
                 el = WebDriverWait(driver, per).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
                 )
                 logger.debug(f"[selenium] Found clickable element: {sel}")
+                if cache_attr:
+                    setattr(self, cache_attr, sel)
                 return el
             except Exception as e:
                 if self._is_dead_session(e):
@@ -656,19 +709,26 @@ class SeleniumLLMBase:
                 pass
             return element
 
-        for sel in self.send_button_selectors:
+        # Try cached send selector first, then fall through the full list
+        ordered_send: list[str] = list(self.send_button_selectors)
+        if self._cached_send_selector and self._cached_send_selector in ordered_send:
+            ordered_send.remove(self._cached_send_selector)
+            ordered_send.insert(0, self._cached_send_selector)
+
+        for sel in ordered_send:
             try:
                 btn = WebDriverWait(driver, 3).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
                 )
                 btn = _resolve_click_target(btn)
                 if _safe_click(btn, sel):
+                    self._cached_send_selector = sel
                     return
             except Exception as e:
                 logger.debug(f"[selenium] selector {sel} not clickable: {e}")
 
         # Secondary fallback: try visible buttons even if not clickable by wait
-        for sel in self.send_button_selectors:
+        for sel in ordered_send:
             try:
                 candidates = driver.find_elements(By.CSS_SELECTOR, sel)
                 for btn in candidates:
@@ -676,6 +736,7 @@ class SeleniumLLMBase:
                         resolved_btn = _resolve_click_target(btn)
                         if resolved_btn.is_displayed() and resolved_btn.is_enabled():
                             if _safe_click(resolved_btn, sel):
+                                self._cached_send_selector = sel
                                 return
                     except Exception:
                         pass
@@ -700,12 +761,14 @@ class SeleniumLLMBase:
         baseline = self._get_latest_response_text(driver)
 
         start = time.time()
+        poll_interval = 0.1
         while time.time() - start < 30:
             cur = self._get_latest_response_text(driver)
             if cur and cur != baseline:
                 logger.debug("[selenium] New response text appeared")
                 break
-            time.sleep(0.5)
+            time.sleep(poll_interval)
+            poll_interval = min(poll_interval * 2, 1.0)
         else:
             logger.warning("[selenium] Response area did not produce new text within 30s")
 
@@ -733,7 +796,7 @@ class SeleniumLLMBase:
                         raise
 
             if generating:
-                time.sleep(1)
+                time.sleep(0.5)
                 stable_since = time.time()
                 continue
 
@@ -764,7 +827,7 @@ class SeleniumLLMBase:
                     logger.debug("[selenium] First new response stable — done")
                     return first_new
 
-            time.sleep(0.5)
+            time.sleep(0.3)
 
         logger.warning("[selenium] Response wait timed out, returning best-effort result")
         return first_new or baseline

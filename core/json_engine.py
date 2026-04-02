@@ -13,15 +13,14 @@ Schema (all fields except ``name`` and ``service_url`` are optional):
 .. code-block:: json
 
     {
-        "name": "chatgpt",
-        "display_name": "ChatGPT (OpenAI)",
-        "aliases": ["chatgpt", "openai", "gpt"],
-        "service_url": "https://chat.openai.com",
-        "default_model": "gpt-4o",
+        "name": "my-engine",
+        "display_name": "My Engine (Example)",
+        "aliases": ["my-engine", "myengine"],
+        "service_url": "https://www.example-llm.com",
+        "default_model": "default",
         "models": {
-            "gpt-4o": 60000,
-            "unlogged": 20000,
-            "default": 51000
+            "default": 32000,
+            "unlogged": 10000
         },
         "selectors": {
             "prompt_area": ["div[contenteditable='true']", "textarea"],
@@ -30,7 +29,7 @@ Schema (all fields except ``name`` and ``service_url`` are optional):
             "stop":         ["button[aria-label*='Stop']"]
         },
         "login_detection": {
-            "url_prefix": "https://chat.openai.com",
+            "url_prefix": "https://www.example-llm.com",
             "url_deny_keywords": ["login", "auth", "signin"],
             "login_button_xpath": "//button[contains(normalize-space(.), 'Log in')]",
             "authenticated_css_selectors": [
