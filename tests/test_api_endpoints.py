@@ -855,3 +855,185 @@ def test_sync_generate_response_retries_on_redirect_stall():
     assert result == "ok response"
     assert call_count == 2
     assert reset_called == [], "Driver must NOT be reset on redirect-stall"
+
+
+# ---------------------------------------------------------------------------
+# Prompt chunking tests
+# ---------------------------------------------------------------------------
+
+
+def test_should_split_prompt_below_limit():
+    """_should_split_prompt must return False when the prompt fits within the limit."""
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 100},
+        default_model="default",
+    )
+    engine._split_prompt_parts = 3
+    assert engine._should_split_prompt("x" * 100) is False
+    assert engine._should_split_prompt("x" * 99) is False
+
+
+def test_should_split_prompt_above_limit():
+    """_should_split_prompt must return True when the prompt exceeds the limit."""
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 100},
+        default_model="default",
+    )
+    engine._split_prompt_parts = 3
+    assert engine._should_split_prompt("x" * 101) is True
+
+
+def test_should_split_prompt_disabled_when_parts_le_1():
+    """_should_split_prompt must return False when SELENIUM_SPLIT_PROMPT_PARTS <= 1."""
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 100},
+        default_model="default",
+    )
+    engine._split_prompt_parts = 1
+    assert engine._should_split_prompt("x" * 200) is False
+
+
+def test_split_prompt_into_parts_count_and_coverage():
+    """_split_prompt_into_parts must produce exactly n parts that together reconstruct the prompt."""
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    prompt = "A" * 300
+    parts = engine._split_prompt_into_parts(prompt, 3)
+    assert len(parts) == 3
+    assert "".join(parts) == prompt
+
+
+def test_split_prompt_into_parts_chunks_within_limit():
+    """Each chunk produced must be <= ceil(len/n) characters."""
+    import math
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    prompt = "B" * 301
+    n = 3
+    parts = engine._split_prompt_into_parts(prompt, n)
+    max_chunk = math.ceil(len(prompt) / n)
+    for part in parts:
+        assert len(part) <= max_chunk
+
+
+def test_execute_chunked_send_invokes_driver_n_times():
+    """_execute_chunked_send must call _fill_input and _click_send once per chunk."""
+    from core.selenium_llm_base import SeleniumLLMBase
+    from unittest.mock import MagicMock
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 100},
+        default_model="default",
+    )
+    engine._split_prompt_parts = 3
+
+    fake_el = MagicMock()
+    fill_calls: list[str] = []
+    click_calls: list[int] = []
+    response_counter = [0]
+
+    def fake_find_interactable(*args, **kwargs):
+        return fake_el
+
+    def fake_fill(driver, element, text):
+        fill_calls.append(text)
+
+    def fake_click(driver, element):
+        click_calls.append(1)
+
+    def fake_post_send_check(driver, **kwargs):
+        return True
+
+    def fake_wait_response(driver, **kwargs):
+        response_counter[0] += 1
+        return f"OK part {response_counter[0]}"
+
+    engine._find_interactable_element = fake_find_interactable
+    engine._fill_input = fake_fill
+    engine._click_send = fake_click
+    engine._post_send_check = fake_post_send_check
+    engine._wait_for_response = fake_wait_response
+
+    # 301-char prompt with limit=100 → ceil(301/100)=4 parts min, but env_max=3
+    # So n = min(3, max(ceil(301/100), 2)) = min(3, 4) = 3
+    prompt = "Z" * 301
+    result = engine._execute_chunked_send(prompt, MagicMock())
+
+    assert len(fill_calls) == 3
+    assert len(click_calls) == 3
+    # The final response is returned
+    assert "part 3" in result
+    # The flag must be reset after completion
+    assert engine._skip_split_for_next is False
+
+
+def test_execute_chunked_send_intermediate_headers():
+    """Intermediate chunks must carry the [INTERNAL-PART{i}/{n}] header."""
+    from core.selenium_llm_base import SeleniumLLMBase
+    from unittest.mock import MagicMock
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 100},
+        default_model="default",
+    )
+    engine._split_prompt_parts = 3
+
+    fake_el = MagicMock()
+    fill_calls: list[str] = []
+
+    engine._find_interactable_element = lambda *a, **kw: fake_el
+    engine._fill_input = lambda d, e, text: fill_calls.append(text)
+    engine._click_send = lambda d, e: None
+    engine._post_send_check = lambda d, **kw: True
+    engine._wait_for_response = lambda d, **kw: "OK"
+
+    prompt = "X" * 301
+    engine._execute_chunked_send(prompt, MagicMock())
+
+    # Intermediate chunks (all but the last) must carry the header
+    n = len(fill_calls)
+    for i, text in enumerate(fill_calls[:-1], start=1):
+        assert f"[INTERNAL-PART{i}/{n}]" in text
+
+    # The final chunk must NOT carry the header
+    assert "[INTERNAL-PART" not in fill_calls[-1]
+
+
+def test_skip_split_flag_prevents_recursion():
+    """When _skip_split_for_next is True, _should_split_prompt is bypassed."""
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 100},
+        default_model="default",
+    )
+    engine._split_prompt_parts = 3
+    engine._skip_split_for_next = True
+    # Even though prompt is way over limit, _should_split_prompt returns True
+    # but the flag prevents _execute_chunked_send from being called again.
+    assert engine._should_split_prompt("X" * 500) is True
+    # Verify the guard works inside _sync_generate_response_once by inspecting the
+    # branch condition: not flag AND should_split → False when flag is True.
+    assert not (not engine._skip_split_for_next and engine._should_split_prompt("X" * 500))

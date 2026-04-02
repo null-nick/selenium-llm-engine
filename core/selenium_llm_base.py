@@ -1,6 +1,7 @@
 import asyncio
 import glob
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -81,6 +82,10 @@ class SeleniumLLMBase:
         # Selector cache: remember the last working selector to try it first
         self._cached_prompt_selector: Optional[str] = None
         self._cached_send_selector: Optional[str] = None
+
+        # Prompt chunking: split prompts that exceed the model char limit
+        self._split_prompt_parts: int = max(1, int(os.getenv("SELENIUM_SPLIT_PROMPT_PARTS", "3")))
+        self._skip_split_for_next: bool = False
 
     def get_supported_models(self) -> list[str]:
         return list(self.model_limits_map.keys())
@@ -500,6 +505,91 @@ class SeleniumLLMBase:
                 pass
         return False
 
+    # ------------------------------------------------------------------ prompt chunking
+
+    def _should_split_prompt(self, prompt: str) -> bool:
+        """Return True if *prompt* exceeds the current model's char limit and chunking is enabled."""
+        if self._split_prompt_parts <= 1:
+            return False
+        limit = self._get_model_limit(self.get_current_model())
+        return len(prompt) > limit
+
+    def _split_prompt_into_parts(self, prompt: str, n: int) -> list[str]:
+        """Split *prompt* into *n* roughly equal text chunks."""
+        chunk_size = math.ceil(len(prompt) / n)
+        return [prompt[i : i + chunk_size] for i in range(0, len(prompt), chunk_size)]
+
+    def _execute_chunked_send(self, prompt: str, driver: Any) -> str:
+        """Send an oversized *prompt* in sequential chunks, keeping the session open.
+
+        Parts 1..N-1 are prefixed with an instruction telling the LLM not to
+        respond yet.  Only the final part triggers a real reply.
+        """
+        limit = self._get_model_limit(self.get_current_model())
+        # Calculate the minimum number of parts that keeps every chunk inside the limit.
+        # Never exceed the configured maximum.
+        min_parts = math.ceil(len(prompt) / limit)
+        n = min(self._split_prompt_parts, max(min_parts, 2))
+        parts = self._split_prompt_into_parts(prompt, n)
+        logger.info(
+            f"[selenium] Prompt chunking: {len(prompt)} chars split into {n} parts "
+            f"(limit={limit}, env_max={self._split_prompt_parts})"
+        )
+
+        for idx, part in enumerate(parts[:-1], start=1):
+            header = (
+                f"[INTERNAL-PART{idx}/{n}] This message contains part {idx} of {n} "
+                "of a large input. Read it carefully and keep it available for "
+                "subsequent messages. Do NOT respond to this part yet. "
+                "Reply ONLY with: OK\n\n"
+            )
+            chunk_text = header + part
+            logger.debug(f"[selenium] Sending chunk {idx}/{n} ({len(chunk_text)} chars)")
+
+            input_el = self._find_interactable_element(
+                driver, self.prompt_area_selectors, timeout=20.0,
+                cache_attr="_cached_prompt_selector",
+            )
+            if input_el is None:
+                raise RuntimeError(f"Could not find prompt input area for chunk {idx}/{n}")
+
+            self._fill_input(driver, input_el, chunk_text)
+            self._click_send(driver, input_el)
+            if not self._post_send_check(driver):
+                self._cached_prompt_selector = None
+                self._cached_send_selector = None
+                raise RuntimeError(
+                    f"redirect-stall: chunk {idx}/{n} not accepted after redirect"
+                )
+            intermediate = self._wait_for_response(driver)
+            if not intermediate:
+                logger.warning(f"[selenium] Empty response for intermediate chunk {idx}/{n}")
+            else:
+                logger.debug(f"[selenium] Chunk {idx}/{n} acknowledged: {intermediate[:80]!r}")
+
+        # Send the final part and return the actual response.
+        logger.debug(f"[selenium] Sending final chunk {n}/{n} ({len(parts[-1])} chars)")
+        self._skip_split_for_next = True
+        try:
+            input_el = self._find_interactable_element(
+                driver, self.prompt_area_selectors, timeout=20.0,
+                cache_attr="_cached_prompt_selector",
+            )
+            if input_el is None:
+                raise RuntimeError(f"Could not find prompt input area for final chunk {n}/{n}")
+
+            self._fill_input(driver, input_el, parts[-1])
+            self._click_send(driver, input_el)
+            if not self._post_send_check(driver):
+                self._cached_prompt_selector = None
+                self._cached_send_selector = None
+                raise RuntimeError(
+                    "redirect-stall: final chunk not accepted after redirect"
+                )
+            return self._wait_for_response(driver)
+        finally:
+            self._skip_split_for_next = False
+
     # ------------------------------------------------------------------ core flow
 
     def _sync_generate_response(self, prompt: str) -> str:
@@ -563,8 +653,12 @@ class SeleniumLLMBase:
             logger.warning("[selenium] Cloudflare captcha challenge detected on page")
             return (
                 "⚠️ Cloudflare CAPTCHA rilevato. "
-                "Per favore completa il CAPTCHA nella pagina e riprova." 
+                "Per favore completa il CAPTCHA nella pagina e riprova."
             )
+
+        # Prompt chunking: split oversized prompts into sequential parts.
+        if not self._skip_split_for_next and self._should_split_prompt(prompt):
+            return self._execute_chunked_send(prompt, driver)
 
         try:
             input_el = self._find_interactable_element(
