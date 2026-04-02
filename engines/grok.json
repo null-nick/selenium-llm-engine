@@ -1,0 +1,52 @@
+{
+  "name": "grok",
+  "display_name": "Grok (xAI)",
+  "aliases": ["grok", "xai"],
+  "service_url": "https://grok.com",
+  "default_model": "grok-4.0",
+  "allow_unlogged": true,
+  "models": {
+    "grok-4.0": 256000,
+    "grok-4.0-2m": 2000000,
+    "unlogged": 256000,
+    "default": 256000
+  },
+  "selectors": {
+    "prompt_area": [
+      "textarea[aria-label='Ask Grok anything']",
+      "textarea[placeholder*='What do you want to know']",
+      "textarea",
+      "div[contenteditable='true']"
+    ],
+    "send_button": [
+      "div.h-10.relative.aspect-square",
+      "div[role='button']",
+      "button[aria-label='Send']",
+      "button[type='submit']"
+    ],
+    "response_area": [
+      "div.message-bubble div.response-content-markdown.markdown",
+      "div.response-content-markdown.markdown",
+      "#response-e01b274c-5cbf-4e4b-98e7-d0673d2e9fec > div.message-bubble.relative.rounded-3xl.text-primary.min-h-7.prose.dark\\:prose-invert.break-words.prose-p\\:opacity-100.prose-strong\\:opacity-100.prose-li\\:opacity-100.prose-ul\\:opacity-100.prose-ol\\:opacity-100.prose-ul\\:my-1.prose-ol\\:my-1.prose-li\\:my-2.last\\:prose-li\\:mb-3.prose-li\\:ps-1.prose-li\\:ms-1.w-full.max-w-none > div > div.relative > div",
+      "div.response-content-markdown",
+      "div.message-bubble",
+      "div.markdown",
+      "div[dir='auto']"
+    ],
+    "stop": [
+      "div.h-10.aspect-square:not(.relative)",
+      "div.h-10.aspect-square:has(svg[width='16'])",
+      "button[aria-label*='Stop']",
+      "button[title*='Stop']"
+    ]
+  },
+  "login_detection": {
+    "url_prefix": "https://accounts.x.ai/sign-in?redirect=grok-com",
+    "url_deny_keywords": ["signin", "login", "auth"],
+    "login_button_xpath": "//a[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(@href, 'sign-in') or @data-slot='button']",
+    "authenticated_css_selectors": [
+      "textarea[aria-label='Ask Grok anything']",
+      "div.message-bubble"
+    ]
+  }
+}
