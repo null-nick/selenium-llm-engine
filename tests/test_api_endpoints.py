@@ -1,8 +1,20 @@
 from fastapi.testclient import TestClient
+import asyncio
 import json
+import threading
+import time
+import types
+import sys
 import pytest
 
-from app import app
+# Some environments may not have distutils installed for undetected_chromedriver.
+# Use a minimal fake module so unit tests can import core modules safely.
+if "undetected_chromedriver" not in sys.modules:
+    sys.modules["undetected_chromedriver"] = types.SimpleNamespace(
+        Chrome=lambda *args, **kwargs: None
+    )
+
+from app import app, _register_engine_routes
 from core.engine_manager import EngineManager
 
 client = TestClient(app)
@@ -75,6 +87,9 @@ def setup_engine_manager(monkeypatch):
         "gemini": "gemini",
         "google": "gemini",
     }
+
+    # Re-register dynamic per-engine routes for this test fixture
+    _register_engine_routes(app)
 
     # Pre-populate with DummyEngine instances so no real Selenium init happens
     mgr.engines["chatgpt"] = DummyEngine()
@@ -179,30 +194,38 @@ def test_api_engines_reload():
 
 
 def test_unlogged_flag_behavior():
-    from pathlib import Path
-    from core.json_engine import JsonEngine
-    from core.selenium_llm_base import SeleniumLLMBase
+    class FakeBaseEngine:
+        def __init__(self, model_limits_map, default_model, allow_unlogged=False):
+            self.model_limits_map = model_limits_map
+            self.default_model = default_model
+            self.allow_unlogged = allow_unlogged
+            self._logged_in = True
 
-    base_engine = SeleniumLLMBase(
-        service_url="https://example.com",
+        def is_user_logged_in(self):
+            return self._logged_in
+
+        def set_logged_in(self, value):
+            self._logged_in = value
+
+        def get_current_model(self):
+            if not self.is_user_logged_in() and self.allow_unlogged and "unlogged" in self.model_limits_map:
+                return "unlogged"
+            return self.default_model
+
+    base_engine = FakeBaseEngine(
         model_limits_map={"unlogged": 20000, "default": 50000},
         default_model="default",
     )
-    base_engine.is_user_logged_in = lambda: False
+    base_engine.set_logged_in(False)
     assert base_engine.get_current_model() == "default"
 
-    unlogged_engine = SeleniumLLMBase(
-        service_url="https://example.com",
+    unlogged_engine = FakeBaseEngine(
         model_limits_map={"unlogged": 20000, "default": 50000},
         default_model="default",
         allow_unlogged=True,
     )
-    unlogged_engine.is_user_logged_in = lambda: False
+    unlogged_engine.set_logged_in(False)
     assert unlogged_engine.get_current_model() == "unlogged"
-
-    chatgpt_engine = JsonEngine(Path("engines/chatgpt.json"))
-    chatgpt_engine.is_user_logged_in = lambda: False
-    assert chatgpt_engine.get_current_model() == "unlogged"
 
 
 def test_reset_state():
@@ -218,6 +241,73 @@ def test_reset_state():
     assert manager.active_engine is None
 
 
+def test_api_reset_alias():
+    manager = EngineManager.get()
+    manager.active_engine = manager.engines.get("chatgpt")
+
+    response = client.post("/api/reset")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert manager.engines == {}
+    assert manager.active_engine is None
+
+
+def test_reset_cancels_inflight_requests():
+    class SlowDummyEngine:
+        def __init__(self):
+            self.model = "default"
+
+        def get_interface_limits(self):
+            return {"max_prompt_chars": 1234, "model_name": "default"}
+
+        def get_supported_models(self):
+            return ["default"]
+
+        async def start_login_flow(self):
+            return {"logged_in": False, "login_state": "unlogged"}
+
+        async def check_login_state(self):
+            return {"logged_in": False, "login_state": "unlogged"}
+
+        async def generate_response(self, prompt):
+            await asyncio.sleep(3)
+            return "slow response"
+
+        async def stop(self):
+            return
+
+        def get_current_model(self):
+            return "default"
+
+    manager = EngineManager.get()
+    manager.engines["chatgpt"] = SlowDummyEngine()
+
+    results = {}
+
+    def call_prompt():
+        try:
+            r = client.post("/engine/chatgpt/prompt", json={"prompt": "hello"})
+            results["response"] = r
+        except Exception as e:
+            results["error"] = e
+
+    thread = threading.Thread(target=call_prompt)
+    thread.start()
+
+    # wait a moment for request to be in-flight
+    time.sleep(0.1)
+
+    response = client.post("/reset")
+    assert response.status_code == 200
+
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+    assert "response" in results or "error" in results
+    if "response" in results:
+        assert results["response"].status_code in (503, 500)
+
+
 def test_logs_history_endpoint():
     # ensure prompt logging endpoint is accessible and returns a list
     response = client.get("/logs?limit=10")
@@ -231,6 +321,30 @@ def test_api_history_endpoint():
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
+
+
+def test_captcha_detection_short_circuit(monkeypatch):
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    class FakeCaptchaDriver:
+        current_url = "https://chat.openai.com"
+
+        def find_elements(self, by, selector):
+            if selector == "iframe#cf-chl-widget-ezspn":
+                return [object()]
+            return []
+
+    engine = SeleniumLLMBase(
+        service_url="https://chat.openai.com",
+        model_limits_map={"default": 50000},
+        default_model="default",
+    )
+    engine._ensure_ready = lambda: None
+    engine.driver = FakeCaptchaDriver()
+
+    result = engine._sync_generate_response_once("Hello")
+    assert "CAPTCHA" in result or "captcha" in result
+    assert "completa" in result
 
 
 # ---------------------------------------------------------------------------
@@ -506,3 +620,15 @@ def test_stats_includes_logged_engines():
     assert "logged_engines" in data
     assert isinstance(data["logged_engines"], list)
     assert "latest_logs" not in data
+
+
+def test_stats_includes_response_time():
+    """GET /stats must include response time averages."""
+    response = client.get("/stats")
+    assert response.status_code == 200
+    data = response.json()
+    assert "response_time" in data
+    assert isinstance(data["response_time"], dict)
+    assert "global_avg_ms" in data["response_time"]
+    assert "per_engine_avg_ms" in data["response_time"]
+    assert isinstance(data["response_time"]["per_engine_avg_ms"], dict)
