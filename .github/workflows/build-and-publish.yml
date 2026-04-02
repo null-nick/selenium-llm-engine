@@ -18,7 +18,15 @@ jobs:
           fetch-depth: 0
       - name: Get short commit
         id: version
-        run: echo "TAG=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+        run: |
+          TAG="${GITHUB_SHA:0:7}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_RUN_ID}"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="$(date +%s)"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
 
   build-and-push:
     needs: prepare
@@ -36,11 +44,21 @@ jobs:
             platform: linux/arm64
     env:
       IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/selenium-llm-engine
-      IMAGE_TAG: ${{ needs.prepare.outputs.TAG }}
+      IMAGE_TAG: ${{ needs.prepare.outputs.TAG || github.run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Validate image parameters
+        run: |
+          if [ -z "$IMAGE_NAME" ] || [ -z "$IMAGE_TAG" ]; then
+            echo "IMAGE_NAME or IMAGE_TAG is empty (IMAGE_NAME='$IMAGE_NAME' IMAGE_TAG='$IMAGE_TAG')" >&2
+            exit 1
+          fi
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
