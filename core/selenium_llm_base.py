@@ -393,8 +393,13 @@ class SeleniumLLMBase:
         raise NotImplementedError()
 
     def is_user_logged_in(self) -> bool:
+        # Avoid initializing a browser for a simple state check when not yet used.
+        if not self._initialized or self.driver is None:
+            if self._last_login_state is not None:
+                return self._last_login_state
+            return False
+
         try:
-            self._ensure_ready()
             logged = self._ensure_logged_in(self.driver)
             self._last_login_state = logged
             return logged
@@ -426,6 +431,11 @@ class SeleniumLLMBase:
     async def check_login_state(self) -> dict[str, Any]:
         """Return current login state without navigating."""
         try:
+            if not self._initialized or self.driver is None:
+                logged = bool(self._last_login_state)
+                state = "logged" if logged else "unlogged"
+                return {"logged_in": logged, "login_state": state}
+
             logged = await asyncio.to_thread(self.is_user_logged_in)
             state = "logged" if logged else "unlogged"
             return {"logged_in": logged, "login_state": state}
@@ -462,6 +472,10 @@ class SeleniumLLMBase:
             )
         )
 
+    def _is_redirect_stall(self, exc: Exception) -> bool:
+        """Return True if *exc* signals a redirect-stall (prompt submitted but page navigated away)."""
+        return "redirect-stall:" in str(exc).lower()
+
     def _reset_driver(self) -> None:
         """Kill the existing (dead) driver and reset state so _ensure_ready re-inits."""
         logger.warning("[selenium] Resetting dead driver session…")
@@ -494,12 +508,18 @@ class SeleniumLLMBase:
             try:
                 return self._sync_generate_response_once(prompt)
             except RuntimeError as e:
-                if attempt == 0 and self._is_dead_session(e):
-                    logger.warning(
-                        f"[selenium] Dead session on attempt {attempt + 1}, resetting and retrying…"
-                    )
-                    self._reset_driver()
-                    continue
+                if attempt == 0:
+                    if self._is_dead_session(e):
+                        logger.warning(
+                            f"[selenium] Dead session on attempt {attempt + 1}, resetting and retrying…"
+                        )
+                        self._reset_driver()
+                        continue
+                    if self._is_redirect_stall(e):
+                        logger.warning(
+                            f"[selenium] Redirect-stall on attempt {attempt + 1}, retrying without driver reset…"
+                        )
+                        continue
                 raise
         # Should not be reached, but satisfy mypy
         raise RuntimeError("_sync_generate_response exhausted retries")
@@ -556,6 +576,12 @@ class SeleniumLLMBase:
 
             self._fill_input(driver, input_el, prompt)
             self._click_send(driver, input_el)
+            if not self._post_send_check(driver):
+                self._cached_prompt_selector = None
+                self._cached_send_selector = None
+                raise RuntimeError(
+                    "redirect-stall: send not accepted after redirect"
+                )
             return self._wait_for_response(driver)
 
         except Exception as e:
@@ -604,9 +630,16 @@ class SeleniumLLMBase:
         per = max(1.5, timeout / max(len(ordered), 1))
         for sel in ordered:
             try:
-                el = WebDriverWait(driver, per).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
-                )
+                condition = EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                # For compatibility with different Selenium versions, expose locator
+                # on the callable condition object so unit tests and mocks can inspect it.
+                if not hasattr(condition, "locator"):
+                    try:
+                        setattr(condition, "locator", (By.CSS_SELECTOR, sel))
+                    except Exception:
+                        pass
+
+                el = WebDriverWait(driver, per).until(condition)
                 logger.debug(f"[selenium] Found clickable element: {sel}")
                 if cache_attr:
                     setattr(self, cache_attr, sel)
@@ -749,6 +782,56 @@ class SeleniumLLMBase:
             logger.debug("[selenium] Sent via Enter key")
         except Exception as e:
             logger.error(f"[selenium] Could not send prompt: {e}")
+
+    def _post_send_check(self, driver: Any, timeout: float = 15.0) -> bool:
+        """Return True if the LLM accepted the prompt (stop button or new text appeared).
+
+        After clicking send, poll for *timeout* seconds to confirm that either:
+        - a stop-button becomes visible (streaming started), or
+        - new response text different from the current baseline appears.
+
+        If neither signal is seen by the deadline, inspects the current URL:
+        - URL no longer on service_url → a redirect occurred → return False (stall detected).
+        - URL still on service_url → model is just slow → return True (let _wait_for_response decide).
+        """
+        baseline = self._get_latest_response_text(driver)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # Check stop button
+            for sel in self.stop_selectors:
+                try:
+                    btns = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for b in btns:
+                        try:
+                            if b.is_displayed():
+                                logger.debug("[selenium] post_send_check: stop button visible — send accepted")
+                                return True
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            # Check new response text
+            cur = self._get_latest_response_text(driver)
+            if cur and cur != baseline:
+                logger.debug("[selenium] post_send_check: new response text appeared — send accepted")
+                return True
+            time.sleep(0.5)
+
+        # Timeout expired — check if we are still on the expected page
+        cur_url = ""
+        try:
+            cur_url = driver.current_url or ""
+        except Exception:
+            pass
+
+        if self.service_url and not cur_url.startswith(self.service_url):
+            logger.warning(
+                f"[selenium] post_send_check: timeout with unexpected URL '{cur_url}' — redirect-stall detected"
+            )
+            return False
+
+        logger.debug("[selenium] post_send_check: timeout but URL looks ok — assuming slow model")
+        return True
 
     def _wait_for_response(self, driver: Any, max_wait: int = 120) -> str:
         """Wait for the LLM response to fully stream, then return its text.

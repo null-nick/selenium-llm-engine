@@ -28,6 +28,14 @@ from db.db import (
     inc_responses,
 )
 from core.engine_manager import EngineManager
+from core.models import (
+    ChatCompletion,
+    LegacyModelList,
+    LegacyModelEntry,
+    ModelEntry,
+    ModelList,
+    PingResponse,
+)
 
 # ---------------------------------------------------------------------------
 # In-memory application log buffer (survives for the process lifetime)
@@ -49,7 +57,7 @@ class _BufferHandler(logging.Handler):
                 _LOG_BUFFER.append(
                     {
                         "seq": _LOG_SEQ,
-                        "time": self.formatTime(record, "%H:%M:%S"),
+                        "time": time.strftime("%H:%M:%S", time.localtime(record.created)),
                         "level": record.levelname,
                         "name": record.name,
                         "msg": self.format(record),
@@ -190,9 +198,9 @@ async def root() -> RedirectResponse:
     return RedirectResponse(url="/ui")
 
 
-@app.get("/api/ping")
-async def ping() -> Dict[str, str]:
-    return {"status": "ok", "service": "selenium-llm-engine"}
+@app.get("/api/ping", response_model=PingResponse)
+async def ping() -> PingResponse:
+    return PingResponse(status="ok", service="selenium-llm-engine")
 
 
 @app.get("/api/engines")
@@ -200,6 +208,33 @@ async def api_engines() -> Dict[str, Any]:
     """List all discovered engines with metadata (no browser started)."""
     mgr = EngineManager.get()
     return {"data": mgr.list_engines()}
+
+
+@app.get("/api/engines/default")
+async def api_engines_default() -> Dict[str, Any]:
+    """Get the currently configured default engine."""
+    mgr = EngineManager.get()
+    try:
+        default_engine = mgr.get_default_engine()
+    except ValueError:
+        raise HTTPException(status_code=404, detail="No engines available")
+    return {"default_engine": default_engine}
+
+
+@app.post("/api/engines/default")
+async def api_set_default_engine(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Set the default engine by name or alias."""
+    engine_name = body.get("engine")
+    if not engine_name:
+        raise HTTPException(status_code=400, detail="Missing engine")
+
+    mgr = EngineManager.get()
+    try:
+        canonical = mgr.set_default_engine(engine_name)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"Engine not found: {engine_name}")
+
+    return {"status": "ok", "default_engine": canonical}
 
 
 @app.post("/api/engines/reload")
@@ -210,8 +245,8 @@ async def api_engines_reload() -> Dict[str, Any]:
     return {"status": "ok", "data": updated}
 
 
-@app.get("/models")
-async def models() -> Dict[str, Any]:
+@app.get("/models", response_model=LegacyModelList)
+async def models() -> LegacyModelList:
     """Legacy endpoint — returns OpenAI-compatible model list (same as /v1/models).
     Also includes legacy 'name'/'limits'/'supported_models' fields for backward
     compatibility with older clients."""
@@ -235,8 +270,8 @@ async def models() -> Dict[str, Any]:
             entry["supported_models"] = eng.get_supported_models()
         except Exception:
             pass
-        data.append(entry)
-    return {"object": "list", "data": data}
+        data.append(LegacyModelEntry(**entry))
+    return LegacyModelList(object="list", data=data)
 
 
 @app.get("/models/{engine_name}")
@@ -274,7 +309,7 @@ async def login_state(engine_name: str) -> Dict[str, Any]:
     return state
 
 
-@app.post("/engine/{engine_name}/prompt")
+@app.post("/engine/{engine_name}/prompt", response_model=ChatCompletion)
 async def engine_prompt(engine_name: str, req: Request) -> Any:
     """Dynamic prompt endpoint — works for any discovered engine."""
     if _rate_limit_exceeded(req):
@@ -325,28 +360,29 @@ def _register_engine_routes(application: FastAPI) -> None:
             f"/{engine_name}/prompt",
             _make_handler(engine_name),
             methods=["POST"],
+            response_model=ChatCompletion,
         )
         logger.info(f"[app] Registered route POST /{engine_name}/prompt")
 
 
-@app.get("/v1/models")
-async def v1_models() -> Dict[str, Any]:
+@app.get("/v1/models", response_model=ModelList)
+async def v1_models() -> ModelList:
     """OpenAI-compatible model list. Returns one entry per provider (canonical name).
     Clients that send model='chatgpt' or model='gemini' will be routed correctly.
     Aliases and per-variant ids are intentionally excluded to maximise client compatibility."""
     mgr = EngineManager.get()
     created = int(time.time())
-    entries: list[Dict[str, Any]] = []
+    entries: list[ModelEntry] = []
     for desc in mgr.list_engines():
         entries.append(
-            {
-                "id": desc["name"],
-                "object": "model",
-                "created": created,
-                "owned_by": "selenium-llm-engine",
-            }
+            ModelEntry(
+                id=desc["name"],
+                object="model",
+                created=created,
+                owned_by="selenium-llm-engine",
+            )
         )
-    return {"object": "list", "data": entries}
+    return ModelList(object="list", data=entries)
 
 
 @app.get("/v1/models/{model_id:path}")
@@ -366,21 +402,27 @@ async def v1_model_detail(model_id: str) -> Dict[str, Any]:
     }
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", response_model=ChatCompletion)
 async def openai_chat(req: Request) -> Any:
     if _rate_limit_exceeded(req):
         raise HTTPException(status_code=429, detail="Too many requests")
 
     data = await _safe_parse_json(req)
-    model = data.get("model") or "chatgpt"
-    # Support provider:variant notation (e.g. "chatgpt:gpt-4o" -> engine="chatgpt")
-    engine_hint = model.split(":")[0]
+    model = data.get("model")
     mgr = EngineManager.get()
-    try:
-        engine = mgr._resolve(engine_hint)
-    except ValueError:
-        # Fall back to chatgpt for unrecognised model names (OpenAI compat behaviour)
-        engine = "chatgpt"
+
+    if not model:
+        engine = mgr.get_default_engine()
+        model = engine
+    else:
+        # Support provider:variant notation (e.g. "chatgpt:gpt-4o" -> engine="chatgpt")
+        engine_hint = str(model).split(":")[0]
+        try:
+            engine = mgr._resolve(engine_hint)
+        except ValueError:
+            # Fall back to configured default engine for unrecognised names
+            engine = mgr.get_default_engine()
+            model = engine
 
     if "prompt" in data:
         prompt_payload = data.get("prompt")
@@ -397,7 +439,7 @@ async def openai_chat(req: Request) -> Any:
 
 
 # Legacy alias — some clients call /chat/completions without the /v1 prefix
-@app.post("/chat/completions")
+@app.post("/chat/completions", response_model=ChatCompletion)
 async def openai_chat_legacy(req: Request) -> Any:
     return await openai_chat(req)
 

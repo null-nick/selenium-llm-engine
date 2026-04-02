@@ -358,6 +358,32 @@ def test_captcha_detection_short_circuit(monkeypatch):
     assert "completa" in result
 
 
+def test_check_login_state_no_browser_launch_when_uninitialized():
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    engine = SeleniumLLMBase(
+        service_url="https://chat.openai.com",
+        model_limits_map={"default": 50000},
+        default_model="default",
+    )
+
+    # If check_login_state is called before initialization, it must not cause browser init
+    called = False
+
+    def fail_init():
+        nonlocal called
+        called = True
+        raise RuntimeError("_ensure_ready should not be called")
+
+    engine._ensure_ready = fail_init
+    engine.driver = None
+
+    state = asyncio.run(engine.check_login_state())
+    assert state["login_state"] == "unlogged"
+    assert state["logged_in"] is False
+    assert called is False
+
+
 # ---------------------------------------------------------------------------
 # OpenAI-compatible /v1/* endpoint tests
 # ---------------------------------------------------------------------------
@@ -411,12 +437,36 @@ def test_v1_chat_completions_messages():
 
 
 def test_v1_chat_null_model():
-    """model=null must not crash — falls back to chatgpt."""
+    """model=null must not crash — falls back to default engine."""
     response = client.post(
         "/v1/chat/completions",
         json={"model": None, "messages": [{"role": "user", "content": "Hi"}]},
     )
     assert response.status_code == 200
+    data = response.json()
+    assert data["engine"] == "chatgpt"
+
+
+def test_api_engines_default_setting():
+    response = client.get("/api/engines/default")
+    assert response.status_code == 200
+    assert response.json()["default_engine"] == "chatgpt"
+
+    response = client.post("/api/engines/default", json={"engine": "gemini"})
+    assert response.status_code == 200
+    assert response.json()["default_engine"] == "gemini"
+
+    response = client.get("/api/engines/default")
+    assert response.status_code == 200
+    assert response.json()["default_engine"] == "gemini"
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Hello"}]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["engine"] == "gemini"
 
 
 def test_v1_chat_provider_variant_model():
@@ -643,3 +693,165 @@ def test_stats_includes_response_time():
     assert "global_avg_ms" in data["response_time"]
     assert "per_engine_avg_ms" in data["response_time"]
     assert isinstance(data["response_time"]["per_engine_avg_ms"], dict)
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI schema compliance tests (Pydantic response_model validation)
+# ---------------------------------------------------------------------------
+
+
+def test_openapi_schema_has_chat_completion_response():
+    """The OpenAPI schema must document a response body for /v1/chat/completions."""
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    path = schema["paths"].get("/v1/chat/completions", {})
+    post_op = path.get("post", {})
+    responses = post_op.get("responses", {})
+    assert "200" in responses, "POST /v1/chat/completions must have a 200 response schema"
+    content = responses["200"].get("content", {})
+    assert "application/json" in content, "Response must be application/json"
+
+
+def test_openapi_schema_has_models_response():
+    """The OpenAPI schema must document a response body for /v1/models."""
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    path = schema["paths"].get("/v1/models", {})
+    get_op = path.get("get", {})
+    responses = get_op.get("responses", {})
+    assert "200" in responses
+    content = responses["200"].get("content", {})
+    assert "application/json" in content
+
+
+def test_chat_completion_response_schema_fields():
+    """POST /v1/chat/completions response must contain all required OpenAI-compatible fields."""
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "chatgpt", "messages": [{"role": "user", "content": "Hi"}]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    required = {"id", "object", "created", "model", "choices", "usage", "engine", "prompt", "elapsed_ms"}
+    assert required <= data.keys(), f"Missing fields: {required - data.keys()}"
+    assert data["object"] == "chat.completion"
+    assert isinstance(data["choices"], list)
+    assert len(data["choices"]) > 0
+    choice = data["choices"][0]
+    assert "message" in choice
+    assert choice["message"]["role"] == "assistant"
+    assert isinstance(data["usage"]["total_tokens"], int)
+
+
+def test_ping_response_schema():
+    """GET /api/ping must return {status, service} — validated by PingResponse model."""
+    response = client.get("/api/ping")
+    assert response.status_code == 200
+    data = response.json()
+    assert set(data.keys()) >= {"status", "service"}
+    assert isinstance(data["status"], str)
+    assert isinstance(data["service"], str)
+
+
+def test_v1_models_response_schema_fields():
+    """GET /v1/models entries must all carry the four required OpenAI model fields."""
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    data = response.json()
+    required_entry_fields = {"id", "object", "created", "owned_by"}
+    for entry in data["data"]:
+        assert required_entry_fields <= entry.keys(), f"Missing: {required_entry_fields - entry.keys()}"
+        assert isinstance(entry["created"], int)
+
+
+def test_legacy_models_response_schema_fields():
+    """GET /models entries must have all OpenAI fields plus the legacy 'name' field."""
+    response = client.get("/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "list"
+    for entry in data["data"]:
+        assert "id" in entry
+        assert "object" in entry
+        assert "name" in entry
+
+
+# ---------------------------------------------------------------------------
+# Redirect-stall detection tests
+# ---------------------------------------------------------------------------
+
+
+def test_post_send_check_returns_true_when_stop_button_visible():
+    """_post_send_check must return True immediately when a stop button becomes visible."""
+    from core.selenium_llm_base import SeleniumLLMBase
+    from unittest.mock import MagicMock
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    engine.stop_selectors = ["button[aria-label*='Stop']"]
+
+    fake_btn = MagicMock()
+    fake_btn.is_displayed.return_value = True
+
+    mock_driver = MagicMock()
+    mock_driver.find_elements.return_value = [fake_btn]
+    mock_driver.current_url = "https://example.com"
+
+    result = engine._post_send_check(mock_driver, timeout=2.0)
+    assert result is True
+
+
+def test_post_send_check_returns_false_on_redirect():
+    """_post_send_check must return False when timeout expires and URL has changed."""
+    from core.selenium_llm_base import SeleniumLLMBase
+    from unittest.mock import MagicMock
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    engine.stop_selectors = ["button[aria-label*='Stop']"]
+    engine.response_area_selectors = [".assistant-message"]
+
+    mock_driver = MagicMock()
+    # No stop button, no response text
+    mock_driver.find_elements.return_value = []
+    mock_driver.current_url = "https://auth.example.com/login"
+
+    result = engine._post_send_check(mock_driver, timeout=0.1)
+    assert result is False
+
+
+def test_sync_generate_response_retries_on_redirect_stall():
+    """_sync_generate_response must retry once on redirect-stall without resetting the driver."""
+    from core.selenium_llm_base import SeleniumLLMBase
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+
+    call_count = 0
+
+    def fake_once(prompt):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("redirect-stall: send not accepted after redirect")
+        return "ok response"
+
+    engine._sync_generate_response_once = fake_once
+    reset_called = []
+    engine._reset_driver = lambda: reset_called.append(True)
+
+    result = engine._sync_generate_response("hello")
+    assert result == "ok response"
+    assert call_count == 2
+    assert reset_called == [], "Driver must NOT be reset on redirect-stall"

@@ -311,6 +311,7 @@
         <div class="card" style="grid-column: span 2;">
             <h2>Engines
                 <button class="reload" onclick="reloadEngines()" style="font-size:0.8rem; padding:3px 10px; margin-left:10px;">&#x21BA; Reload</button>
+                <button class="reload" onclick="refreshEngineLoginLabels()" style="font-size:0.8rem; padding:3px 10px; margin-left:5px;">&#x21BB; Refresh login</button>
             </h2>
             <p style="font-size:0.85rem; color:var(--text-muted); margin:0 0 10px;">
                 Engines are loaded automatically from the <code>engines/</code> directory.
@@ -336,11 +337,15 @@
         <div class="card">
             <h2>Send Prompt</h2>
             <label>Engine</label>
-            <select id="engine-select">
-                <option value="">Loading engines&hellip;</option>
-            </select>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <select id="engine-select" style="flex:1;">
+                    <option value="">Loading engines…</option>
+                </select>
+                <button onclick="setDefaultEngine(document.getElementById('engine-select').value)" style="white-space:nowrap;">Set default</button>
+            </div>
+            <div id="engine-default-info" style="margin-top:4px; color:#666; font-size:0.9rem;">Default engine: none</div>
             <label>Prompt</label>
-            <textarea id="prompt-input" rows="4" placeholder="Type prompt&hellip;"></textarea>
+            <textarea id="prompt-input" rows="4" placeholder="Type prompt…"></textarea>
             <button class="primary" onclick="sendPrompt()" style="margin-top:8px; width:100%;">Send</button>
             <h3>Response</h3>
             <pre id="response-box">&#x2014;</pre>
@@ -421,6 +426,7 @@
         // ----------------------------------------------------------------
         var _knownEngines  = [];
         var _loggedEngines = new Set();
+        var _defaultEngine = null;
 
         async function refreshEngineLoginLabels() {
             if (!_knownEngines.length) return;
@@ -440,6 +446,44 @@
             renderEnginesList();
         }
 
+        async function fetchDefaultEngine() {
+            try {
+                var data = await fetchJson('/api/engines/default');
+                _defaultEngine = data.default_engine || null;
+                localStorage.setItem('selenium_llm_default_engine', _defaultEngine || '');
+            } catch (_) {
+                _defaultEngine = localStorage.getItem('selenium_llm_default_engine') || null;
+                if (_defaultEngine === '') _defaultEngine = null;
+            }
+            updateDefaultEngineHint();
+        }
+
+        async function setDefaultEngine(engineName) {
+            try {
+                var data = await fetchJson('/api/engines/default', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ engine: engineName }),
+                });
+                _defaultEngine = data.default_engine;
+                localStorage.setItem('selenium_llm_default_engine', _defaultEngine);
+                updateDefaultEngineHint();
+                alert('Default engine set to ' + _defaultEngine);
+            } catch (err) {
+                alert('Failed to set default engine: ' + err.message);
+            }
+        }
+
+        function updateDefaultEngineHint() {
+            var info = document.getElementById('engine-default-info');
+            if (!info) return;
+            if (_defaultEngine) {
+                info.textContent = 'Default engine: ' + _defaultEngine;
+            } else {
+                info.textContent = 'Default engine: none';
+            }
+        }
+
         async function loadEngines() {
             try {
                 var data = await fetchJson('/api/engines');
@@ -456,9 +500,11 @@
                 } catch (_2) { _knownEngines = []; }
             }
 
+            await fetchDefaultEngine();
             renderEnginesList();
             populateEngineDropdowns();
-            refreshEngineLoginLabels();
+            // No automatic login check on page load to avoid force-opening a browser for each engine.
+            // Use manual per-engine "Check state" button or the global refresh button.
         }
 
         function _sourceBadge(src) {
@@ -500,6 +546,7 @@
                     + '<div class="engine-actions">'
                     + '<button onclick="startLogin(\'' + eng.name + '\')">Login ' + (eng.display_name||eng.name) + '</button>'
                     + '<button id="check-btn-' + eng.name + '" onclick="checkLoginState(\'' + eng.name + '\', this)">Check state</button>'
+                    + '<button onclick="setDefaultEngine(\'' + eng.name + '\')">Set default</button>'
                     + '<button onclick="selectEngineFor(\'' + eng.name + '\')">Select for prompt</button>'
                     + '</div>'
                     + '<div id="check-result-' + eng.name + '" class="check-result"></div>'
@@ -513,12 +560,24 @@
             select.innerHTML = _knownEngines.map(function(e) {
                 return '<option value="' + e.name + '">' + (e.display_name||e.name) + '</option>';
             }).join('');
-            if (prevEngine) select.value = prevEngine;
+
+            var explicitDefault = localStorage.getItem('selenium_llm_default_engine');
+            var candidate = prevEngine || _defaultEngine || (explicitDefault && explicitDefault !== '' ? explicitDefault : null);
+            if (candidate && Array.from(select.options).some(function(o){ return o.value === candidate;})) {
+                select.value = candidate;
+            } else if (prevEngine) {
+                select.value = prevEngine;
+            }
+
+            updateDefaultEngineHint();
         }
 
         function selectEngineFor(name) {
             document.getElementById('engine-select').value = name;
             document.getElementById('prompt-input').focus();
+            localStorage.setItem('selenium_llm_default_engine', name);
+            _defaultEngine = name;
+            updateDefaultEngineHint();
         }
 
         async function reloadEngines() {

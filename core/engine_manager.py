@@ -247,6 +247,7 @@ class EngineManager:
     def __init__(self) -> None:
         self.engines: dict[str, SeleniumLLMBase] = {}
         self.active_engine: Optional[SeleniumLLMBase] = None
+        self.default_engine: str | None = None
         self._descriptors: dict[str, EngineDescriptor] = {}
         self._alias_map: dict[str, str] = {}  # alias → canonical name
         self._load_descriptors()
@@ -323,6 +324,21 @@ class EngineManager:
         engine = self.get_engine(name)
         self.active_engine = engine
         return engine
+
+    def set_default_engine(self, name: str) -> str:
+        canonical = self._resolve(name)
+        if canonical not in self._descriptors:
+            raise ValueError(f"Unknown engine: '{name}'")
+        self.default_engine = canonical
+        return canonical
+
+    def get_default_engine(self) -> str:
+        if self.default_engine and self.default_engine in self._descriptors:
+            return self.default_engine
+        if self._descriptors:
+            # Use the first loaded engine as fallback
+            return next(iter(self._descriptors))
+        raise ValueError("No engines registered")
 
     def get_active_engine(self) -> SeleniumLLMBase:
         if not self.active_engine:
