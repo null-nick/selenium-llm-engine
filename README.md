@@ -1,23 +1,42 @@
 # Selenium LLM Engine
 
-> [!NOTE]
-> The application listens on port `8000` by default. Docker Compose maps this to `14848` in this repository, but you can change this mapping freely in `docker-compose.yml`.
+
+> Disclaimer: this software has been vibe-coded.
+
+![Docker Pulls](https://img.shields.io/docker/pulls/xargonwan/selenium-llm-engine)
+| Branch    | Build Status                                                                                                                                         | Docs Status                                                                                                                                      |
+|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| `main`    | [![CI Status](https://img.shields.io/github/actions/workflow/status/xargonwan/selenium-llm-engine/build-release.yml)](https://github.com/xargonwan/selenium-llm-engine/actions)
 
 This repository provides a standalone, Docker-friendly Selenium-powered LLM engine proxy. It automates browser access to Web GPTs via Selenium to expose a simple OpenAI-compatible API and web admin UI.
 
 Feel free to submit pull requests with improvements, new engines, or engine definitions (`engines/*.json` or `engines/*.py`).
+
+</br>
+> [!NOTE]
+> The application listens on port `8000` by default. Docker Compose maps this to `14848` in this repository, but you can change this mapping freely in `docker-compose.yml`.
+
 
 ## Features
 
 - Selenium-based support web based LLM.
 - Unified REST API endpoints:
   - `/api/ping`
+  - `/api/engines`
+  - `/api/engines/reload`
   - `/models` and `/models/{engine}`
   - `/login/{engine}` and `/login/{engine}/state`
-  - `/<service>/prompt`,
+  - `/engine/{engine}/prompt`
+  - `/v1/models`
+  - `/v1/models/{model_id:path}`
   - `/v1/chat/completions` (OpenAI-like compatibility)
   - `/chat/completions` (OpenAI-like legacy compatibility)
-  - `/stats`, `/logs`, `/ui`
+  - `/stats` (aggregated counters + response time averages)
+  - `/api/logs/app` (incremental app log polling)
+  - `/api/engines/selector-hints` (runtime selector hints)
+  - `/reset` and `/api/reset`
+  - `/logs` and `/api/history`
+  - `/ui`
 - SQLite storage for prompt logs and counters
 - Web UI for simple login, prompt sending and metrics
 - Docker + docker-compose support
