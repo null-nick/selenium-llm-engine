@@ -26,6 +26,7 @@ with no engines registered and logs a warning.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import inspect
 import json
@@ -64,6 +65,20 @@ class EngineDescriptor:
     source_path: str  # filesystem path
     allow_unlogged: bool = False
     notes: str | None = None
+    # Maximum number of parallel workers for this engine.  1 = fully serial
+    # (default).  Values > 1 are reserved for future parallel-session support;
+    # the queue infrastructure already handles them correctly.
+    max_workers: int = 1
+
+    def limits_dict(self) -> dict:
+        """Return interface-limits metadata without starting a browser."""
+        model_name = self.default_model
+        limit = self.models.get(model_name) or self.models.get("default") or 10000
+        return {"max_prompt_chars": limit, "model_name": model_name}
+
+    def supported_models_list(self) -> list[str]:
+        """Return the list of model names known at descriptor level."""
+        return list(self.models.keys())
 
     def to_dict(self) -> dict:
         data = {
@@ -74,6 +89,7 @@ class EngineDescriptor:
             "models": self.models,
             "default_model": self.default_model,
             "allow_unlogged": self.allow_unlogged,
+            "max_workers": self.max_workers,
             "source": self.source,
             "source_path": self.source_path,
         }
@@ -104,6 +120,7 @@ def _scan_json(path: Path) -> Optional[EngineDescriptor]:
             default_model=cfg.get("default_model", "default"),
             allow_unlogged=bool(cfg.get("allow_unlogged", False)),
             notes=cfg.get("notes"),
+            max_workers=int(cfg.get("max_workers", 1)),
             source="json",
             source_path=str(path),
         )
@@ -138,6 +155,7 @@ def _scan_python(path: Path) -> Optional[EngineDescriptor]:
                     models=dict(getattr(obj, "ENGINE_MODELS", {"default": 10000})),
                     default_model=getattr(obj, "ENGINE_DEFAULT_MODEL", "default"),
                     allow_unlogged=bool(getattr(obj, "ENGINE_ALLOW_UNLOGGED", False)),
+                    max_workers=int(getattr(obj, "ENGINE_MAX_WORKERS", 1)),
                     source="python",
                     source_path=str(path),
                 )
@@ -231,6 +249,25 @@ def _instantiate(descriptor: EngineDescriptor, **kwargs) -> "SeleniumLLMBase":
     raise ValueError(f"Unknown engine source type: {descriptor.source!r}")
 
 
+# ---------------------------------------------------------------------------
+# FIFO queue helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _PromptResult:
+    """Result of a queued prompt job."""
+
+    text: str
+    model_name: str
+
+
+@dataclass
+class _PromptJob:
+    """A single prompt task placed on a per-engine FIFO queue."""
+
+    prompt: str
+    future: asyncio.Future  # type: ignore[type-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +287,12 @@ class EngineManager:
         self.default_engine: str | None = None
         self._descriptors: dict[str, EngineDescriptor] = {}
         self._alias_map: dict[str, str] = {}  # alias → canonical name
+        # Per-engine FIFO queues and their worker tasks.
+        # Each engine gets exactly max_workers coroutine workers consuming
+        # the queue; this serialises requests (max_workers=1) while
+        # providing the scaffolding for future parallel-session support.
+        self._job_queues: dict[str, asyncio.Queue[_PromptJob]] = {}
+        self._queue_workers: dict[str, list[asyncio.Task]] = {}  # type: ignore[type-arg]
         self._load_descriptors()
 
     @classmethod
@@ -344,6 +387,107 @@ class EngineManager:
         if not self.active_engine:
             raise RuntimeError("No active engine set")
         return self.active_engine
+
+    def get_descriptor(self, name: str) -> Optional[EngineDescriptor]:
+        """Return the descriptor for *name* (or an alias) without starting a browser."""
+        try:
+            canonical = self._resolve(name)
+            return self._descriptors.get(canonical)
+        except ValueError:
+            return None
+
+    # ---------------------------------------------------------------------- FIFO queue
+
+    def _get_or_create_queue(self, canonical: str) -> asyncio.Queue[_PromptJob]:
+        if canonical not in self._job_queues:
+            self._job_queues[canonical] = asyncio.Queue()
+        return self._job_queues[canonical]
+
+    def _ensure_workers(self, canonical: str) -> None:
+        """Start worker coroutines for *canonical* if they are not already running.
+
+        ``max_workers`` from the descriptor controls the pool size.  With the
+        default value of 1 the engine is fully serial: requests are processed
+        one at a time in FIFO order.
+        """
+        desc = self._descriptors.get(canonical)
+        target = max(1, desc.max_workers if desc else 1)
+
+        existing = self._queue_workers.get(canonical, [])
+        # Prune finished workers before counting live ones
+        alive = [t for t in existing if not t.done()]
+        self._queue_workers[canonical] = alive
+
+        needed = target - len(alive)
+        for _ in range(needed):
+            task = asyncio.ensure_future(self._queue_worker_loop(canonical))
+            self._queue_workers[canonical].append(task)
+
+    async def _queue_worker_loop(self, engine_name: str) -> None:
+        """Coroutine that processes prompt jobs for *engine_name* sequentially."""
+        queue = self._get_or_create_queue(engine_name)
+        while True:
+            job = await queue.get()
+            try:
+                engine = self.get_engine(engine_name)  # lazy-init browser here
+                self.active_engine = engine
+                result_text = await engine.generate_response(job.prompt)
+                model_name = engine.get_current_model()
+                if not job.future.done():
+                    job.future.set_result(_PromptResult(text=result_text, model_name=model_name))
+            except asyncio.CancelledError:
+                if not job.future.done():
+                    job.future.cancel()
+                raise
+            except Exception as exc:
+                if not job.future.done():
+                    job.future.set_exception(exc)
+            finally:
+                queue.task_done()
+
+    async def enqueue(self, engine_name: str, prompt: str) -> _PromptResult:
+        """Submit *prompt* to the named engine's FIFO queue and await the result.
+
+        The engine browser is started lazily by the worker, not by the HTTP
+        handler.  Concurrent callers on the same engine are serialised
+        automatically (max_workers=1 default).
+        """
+        canonical = self._resolve(engine_name)
+        queue = self._get_or_create_queue(canonical)
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[_PromptResult] = loop.create_future()
+        job = _PromptJob(prompt=prompt, future=future)
+        self._ensure_workers(canonical)
+        await queue.put(job)
+        return await future
+
+    async def drain_queues(self) -> None:
+        """Cancel all worker tasks and drain pending jobs from every queue.
+
+        Called during reset so in-flight and queued requests are terminated
+        cleanly before the engine instances are destroyed.
+        """
+        # Cancel all workers
+        all_workers = [
+            t for tasks in self._queue_workers.values() for t in tasks
+        ]
+        for t in all_workers:
+            t.cancel()
+        if all_workers:
+            await asyncio.gather(*all_workers, return_exceptions=True)
+        self._queue_workers.clear()
+
+        # Drain remaining queued jobs (cancel their futures)
+        for queue in self._job_queues.values():
+            while not queue.empty():
+                try:
+                    job = queue.get_nowait()
+                    if not job.future.done():
+                        job.future.cancel()
+                    queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+        self._job_queues.clear()
 
     # ---------------------------------------------------------------------- lifecycle
 

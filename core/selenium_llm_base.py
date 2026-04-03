@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, Dict, Optional, cast
 
@@ -15,10 +16,16 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 logger = logging.getLogger("selenium_llm_base")
+
+# Global lock that serialises Chrome initialisation across all engine instances.
+# Prevents concurrent _cleanup_chromium_remnants() calls from killing each
+# other's browsers when multiple engines are started simultaneously.
+_CHROMIUM_INIT_LOCK = threading.Lock()
 
 
 class SeleniumLLMBase:
@@ -227,100 +234,101 @@ class SeleniumLLMBase:
 
     def _init_driver(self) -> Any:
         """Initialize Chrome driver using the same approach as SyntH's _create_shared_driver."""
-        if self.driver is not None:
+        if self.driver is not None:  # fast path — no lock needed
             return self.driver
 
-        logger.info("[selenium] Initializing Chrome driver...")
-        self._cleanup_chromium_remnants()
+        with _CHROMIUM_INIT_LOCK:
+            # Re-check after acquiring: another thread may have initialised already.
+            if self.driver is not None:
+                return self.driver
 
-        chromium_binary = self._locate_chromium_binary() or "/usr/bin/chromium"
-        chromedriver_path = (
-            self._locate_chromedriver_binary() or "/usr/bin/chromedriver"
-        )
+            logger.info("[selenium] Initializing Chrome driver...")
+            self._cleanup_chromium_remnants()
 
-        # Get Chromium major version for uc compatibility
-        chromium_major = self._get_chromium_major_version(chromium_binary)
-
-        # Clear undetected-chromedriver cache to avoid stale patched binaries
-        uc_cache_dir = os.path.join(tempfile.gettempdir(), "undetected_chromedriver")
-        if os.path.exists(uc_cache_dir):
-            shutil.rmtree(uc_cache_dir, ignore_errors=True)
-            logger.info("[selenium] Cleared undetected-chromedriver cache")
-
-        max_retries = 3
-        self.driver = None
-        last_err: Optional[Exception] = None
-        for attempt in range(max_retries):
-            options = self._build_options()
-            options.binary_location = chromium_binary
-            try:
-                logger.info(
-                    f"[selenium] Driver initialization attempt {attempt + 1}/{max_retries}"
-                )
-                # Match SyntH's working _create_shared_driver() pattern exactly:
-                # - Use standard Options() (set in _build_options)
-                # - Pass service=Service(executable_path=...) for chromedriver
-                # - Pass version_main for uc version compatibility
-                uc_kwargs: dict[str, Any] = {
-                    "options": options,
-                    "service": Service(executable_path=chromedriver_path),
-                }
-                if chromium_major is not None:
-                    uc_kwargs["version_main"] = chromium_major
-                self.driver = uc.Chrome(**uc_kwargs)
-
-                # Clean up extra windows (SyntH pattern)
-                if len(self.driver.window_handles) > 1:
-                    logger.info(
-                        f"[selenium] Driver created with {len(self.driver.window_handles)} windows, cleaning up..."
-                    )
-                    for handle in self.driver.window_handles[1:]:
-                        try:
-                            self.driver.switch_to.window(handle)
-                            self.driver.close()
-                        except Exception:
-                            pass
-                    self.driver.switch_to.window(self.driver.window_handles[0])
-
-                logger.info(
-                    f"[selenium] Driver created with {len(self.driver.window_handles)} window(s)"
-                )
-                break
-            except Exception as err:
-                last_err = err
-                logger.warning(
-                    f"[selenium] Attempt {attempt + 1}/{max_retries} failed: {err}"
-                )
-                self._cleanup_chromium_remnants()
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-
-        if self.driver is None:
-            # Fallback: standard webdriver (no anti-detection patching)
-            logger.warning(
-                "[selenium] uc.Chrome failed after all retries, trying webdriver.Chrome fallback"
+            chromium_binary = self._locate_chromium_binary() or "/usr/bin/chromium"
+            chromedriver_path = (
+                self._locate_chromedriver_binary() or "/usr/bin/chromedriver"
             )
-            try:
-                fallback_options = self._build_options()
-                fallback_options.binary_location = chromium_binary
-                self.driver = webdriver.Chrome(
-                    service=Service(executable_path=chromedriver_path),
-                    options=fallback_options,
-                )
-                logger.info("[selenium] webdriver.Chrome fallback succeeded")
-            except Exception as fallback_err:
-                logger.error(
-                    f"[selenium] webdriver.Chrome fallback also failed: {fallback_err}"
-                )
-                raise RuntimeError(
-                    f"Driver initialization failed (uc: {last_err!r}, fallback: {fallback_err!r})"
-                ) from fallback_err
 
-        self.driver.set_page_load_timeout(120)
-        self.driver.set_script_timeout(120)
-        self._initialized = True
-        logger.info("[selenium] Driver initialized successfully")
-        return self.driver
+            # Get Chromium major version for uc compatibility
+            chromium_major = self._get_chromium_major_version(chromium_binary)
+
+            # Clear undetected-chromedriver cache to avoid stale patched binaries
+            uc_cache_dir = os.path.join(tempfile.gettempdir(), "undetected_chromedriver")
+            if os.path.exists(uc_cache_dir):
+                shutil.rmtree(uc_cache_dir, ignore_errors=True)
+                logger.info("[selenium] Cleared undetected-chromedriver cache")
+
+            max_retries = 3
+            self.driver = None
+            last_err: Optional[Exception] = None
+            for attempt in range(max_retries):
+                options = self._build_options()
+                options.binary_location = chromium_binary
+                try:
+                    logger.info(
+                        f"[selenium] Driver initialization attempt {attempt + 1}/{max_retries}"
+                    )
+                    uc_kwargs: dict[str, Any] = {
+                        "options": options,
+                        "service": Service(executable_path=chromedriver_path),
+                    }
+                    if chromium_major is not None:
+                        uc_kwargs["version_main"] = chromium_major
+                    self.driver = uc.Chrome(**uc_kwargs)
+
+                    # Clean up extra windows (SyntH pattern)
+                    if len(self.driver.window_handles) > 1:
+                        logger.info(
+                            f"[selenium] Driver created with {len(self.driver.window_handles)} windows, cleaning up..."
+                        )
+                        for handle in self.driver.window_handles[1:]:
+                            try:
+                                self.driver.switch_to.window(handle)
+                                self.driver.close()
+                            except Exception:
+                                pass
+                        self.driver.switch_to.window(self.driver.window_handles[0])
+
+                    logger.info(
+                        f"[selenium] Driver created with {len(self.driver.window_handles)} window(s)"
+                    )
+                    break
+                except Exception as err:
+                    last_err = err
+                    logger.warning(
+                        f"[selenium] Attempt {attempt + 1}/{max_retries} failed: {err}"
+                    )
+                    self._cleanup_chromium_remnants()
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+
+            if self.driver is None:
+                # Fallback: standard webdriver (no anti-detection patching)
+                logger.warning(
+                    "[selenium] uc.Chrome failed after all retries, trying webdriver.Chrome fallback"
+                )
+                try:
+                    fallback_options = self._build_options()
+                    fallback_options.binary_location = chromium_binary
+                    self.driver = webdriver.Chrome(
+                        service=Service(executable_path=chromedriver_path),
+                        options=fallback_options,
+                    )
+                    logger.info("[selenium] webdriver.Chrome fallback succeeded")
+                except Exception as fallback_err:
+                    logger.error(
+                        f"[selenium] webdriver.Chrome fallback also failed: {fallback_err}"
+                    )
+                    raise RuntimeError(
+                        f"Driver initialization failed (uc: {last_err!r}, fallback: {fallback_err!r})"
+                    ) from fallback_err
+
+            self.driver.set_page_load_timeout(120)
+            self.driver.set_script_timeout(120)
+            self._initialized = True
+            logger.info("[selenium] Driver initialized successfully")
+            return self.driver
 
     def _cleanup_chromium_remnants(self) -> None:
         """Aggressively clean up Chromium processes and lock files (SyntH pattern)."""
@@ -738,6 +746,13 @@ class SeleniumLLMBase:
                 if cache_attr:
                     setattr(self, cache_attr, sel)
                 return el
+            except StaleElementReferenceException as e:
+                logger.warning(
+                    f"[selenium] Stale element for selector {sel}; invalidating cache and continuing: {e}"
+                )
+                if cache_attr and getattr(self, cache_attr, None) == sel:
+                    setattr(self, cache_attr, None)
+                continue
             except Exception as e:
                 if self._is_dead_session(e):
                     raise  # propagate to _sync_generate_response for driver reset
@@ -773,24 +788,52 @@ class SeleniumLLMBase:
                     pass
             element.send_keys(text)
         else:
-            # contenteditable (ProseMirror, Quill, …): select-all then type
+            # contenteditable (ProseMirror, Quill, …)
+            # Prefer JS execCommand: instant, no char-by-char latency.  Fall back
+            # to send_keys if execCommand is unavailable or raises.
+            js_ok = False
             try:
-                element.send_keys(Keys.CONTROL + "a")
-                time.sleep(0.05)
-                element.send_keys(text)
+                driver.execute_script(
+                    "arguments[0].focus();"
+                    "document.execCommand('selectAll', false, null);"
+                    "document.execCommand('insertText', false, arguments[1]);",
+                    element,
+                    text,
+                )
+                js_ok = True
             except Exception:
-                # JS fallback: execCommand fires proper DOM events
+                pass
+            if not js_ok:
                 try:
-                    driver.execute_script(
-                        "arguments[0].focus();"
-                        "document.execCommand('selectAll', false, null);"
-                        "document.execCommand('insertText', false, arguments[1]);",
-                        element,
-                        text,
-                    )
+                    element.send_keys(Keys.CONTROL + "a")
+                    time.sleep(0.05)
+                    element.send_keys(text)
                 except Exception as e:
-                    logger.error(f"[selenium] fill_input JS fallback failed: {e}")
+                    logger.error(f"[selenium] fill_input send_keys failed: {e}")
                     raise
+            else:
+                # Some frameworks distinguish programmatic updates from user key events.
+                # Trigger a whitespace keypress + backspace to force UI internals to re-evaluate
+                # and enable the send button as if input was typed by the user.
+                try:
+                    element.send_keys(Keys.SPACE, Keys.BACKSPACE)
+                except Exception:
+                    pass
+
+        # Dispatch input/change events so that React/Vue/framework state machines
+        # immediately enable the send button without waiting for synthetic events.
+        try:
+            driver.execute_script(
+                "arguments[0].dispatchEvent("
+                "  new InputEvent('input', {bubbles:true, cancelable:true})"
+                ");"
+                "arguments[0].dispatchEvent("
+                "  new Event('change', {bubbles:true})"
+                ");",
+                element,
+            )
+        except Exception:
+            pass
         logger.debug(f"[selenium] Filled input ({len(text)} chars)")
 
     def _click_send(self, driver: Any, input_el: Any) -> None:
@@ -848,9 +891,24 @@ class SeleniumLLMBase:
                     EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
                 )
                 btn = _resolve_click_target(btn)
-                if _safe_click(btn, sel):
-                    self._cached_send_selector = sel
-                    return
+                try:
+                    if _safe_click(btn, sel):
+                        self._cached_send_selector = sel
+                        return
+                except StaleElementReferenceException as e:
+                    logger.warning(
+                        f"[selenium] Stale send button for selector {sel}; invalidating cache and continuing: {e}"
+                    )
+                    if self._cached_send_selector == sel:
+                        self._cached_send_selector = None
+                    continue
+            except StaleElementReferenceException as e:
+                logger.warning(
+                    f"[selenium] Stale element in clickable wait for {sel}; continuing: {e}"
+                )
+                if self._cached_send_selector == sel:
+                    self._cached_send_selector = None
+                continue
             except Exception as e:
                 logger.debug(f"[selenium] selector {sel} not clickable: {e}")
 
@@ -862,9 +920,22 @@ class SeleniumLLMBase:
                     try:
                         resolved_btn = _resolve_click_target(btn)
                         if resolved_btn.is_displayed() and resolved_btn.is_enabled():
-                            if _safe_click(resolved_btn, sel):
-                                self._cached_send_selector = sel
-                                return
+                            try:
+                                if _safe_click(resolved_btn, sel):
+                                    self._cached_send_selector = sel
+                                    return
+                            except StaleElementReferenceException as e:
+                                logger.warning(
+                                    f"[selenium] Stale send button in fallback for selector {sel}; continuing: {e}"
+                                )
+                                if self._cached_send_selector == sel:
+                                    self._cached_send_selector = None
+                                continue
+                    except StaleElementReferenceException as e:
+                        logger.warning(
+                            f"[selenium] Stale resolved send button for selector {sel}; continuing: {e}"
+                        )
+                        continue
                     except Exception:
                         pass
             except Exception as e:
@@ -874,6 +945,14 @@ class SeleniumLLMBase:
         try:
             input_el.send_keys(Keys.RETURN)
             logger.debug("[selenium] Sent via Enter key")
+            return
+        except StaleElementReferenceException as e:
+            logger.warning(
+                f"[selenium] Input element stale on Enter key fallback; invalidating cache: {e}"
+            )
+            self._cached_prompt_selector = None
+            self._cached_send_selector = None
+            return
         except Exception as e:
             logger.error(f"[selenium] Could not send prompt: {e}")
 

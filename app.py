@@ -264,12 +264,17 @@ async def models() -> LegacyModelList:
             # Legacy extra fields (kept for backward compat)
             "name": engine_name,
         }
-        try:
-            eng = mgr.get_engine(engine_name)
+        # Use live engine data if the browser is already running, otherwise
+        # fall back to the descriptor metadata (avoids opening browsers on probe).
+        if engine_name in mgr.engines:
+            eng = mgr.engines[engine_name]
             entry["limits"] = eng.get_interface_limits()
             entry["supported_models"] = eng.get_supported_models()
-        except Exception:
-            pass
+        else:
+            desc_obj = mgr.get_descriptor(engine_name)
+            if desc_obj:
+                entry["limits"] = desc_obj.limits_dict()
+                entry["supported_models"] = desc_obj.supported_models_list()
         data.append(LegacyModelEntry(**entry))
     return LegacyModelList(object="list", data=data)
 
@@ -484,27 +489,26 @@ async def _prompt(
     inc_requests()
     start = time.time()
     try:
-        engine = EngineManager.get().set_active_engine(engine_name)
-        effective_model = engine.get_current_model()
+        mgr = EngineManager.get()
 
         if stream:
 
             async def generate_stream():
                 try:
-                    result = await engine.generate_response(prompt_text)
+                    result_obj = await mgr.enqueue(engine_name, prompt_text)
                     elapsed_ms = int((time.time() - start) * 1000)
                     log_prompt(
                         engine_name,
-                        effective_model,
+                        result_obj.model_name,
                         prompt_text,
-                        result,
+                        result_obj.text,
                         "ok",
                         elapsed_ms,
                     )
                     inc_responses()
                     chunk_id = f"llm_{int(time.time())}"
-                    yield _openai_chunk(chunk_id, effective_model, result, None)
-                    yield _openai_chunk(chunk_id, effective_model, "", "stop")
+                    yield _openai_chunk(chunk_id, result_obj.model_name, result_obj.text, None)
+                    yield _openai_chunk(chunk_id, result_obj.model_name, "", "stop")
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     elapsed_ms = int((time.time() - start) * 1000)
@@ -516,13 +520,13 @@ async def _prompt(
 
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
-        response = await engine.generate_response(prompt_text)
+        result_obj = await mgr.enqueue(engine_name, prompt_text)
         duration_ms = int((time.time() - start) * 1000)
         log_prompt(
             engine_name,
-            effective_model,
+            result_obj.model_name,
             prompt_text,
-            response,
+            result_obj.text,
             "ok",
             duration_ms,
         )
@@ -530,9 +534,9 @@ async def _prompt(
 
         return _openai_response(
             engine_name,
-            effective_model,
+            result_obj.model_name,
             prompt_text,
-            response,
+            result_obj.text,
             duration_ms,
         )
 
@@ -610,6 +614,13 @@ async def reset_state() -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"[reset] cancel_inflight_tasks error: {e}")
             errors.append(f"cancel: {e}")
+
+        # Drain per-engine queues and cancel pending jobs
+        try:
+            await manager.drain_queues()
+        except Exception as e:
+            logger.warning(f"[reset] drain_queues error: {e}")
+            errors.append(f"drain: {e}")
 
         try:
             await manager.stop_all()

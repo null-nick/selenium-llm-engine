@@ -420,6 +420,49 @@ def test_v1_models_variant():
     assert data["id"] == "chatgpt:default"
 
 
+def test_fill_input_contenteditable_triggers_extra_keystroke():
+    from core.selenium_llm_base import SeleniumLLMBase
+    from selenium.webdriver.common.keys import Keys
+
+    events = []
+
+    class FakeElement:
+        tag_name = "div"
+
+        def click(self):
+            events.append("click")
+
+        def send_keys(self, *args):
+            events.append(("send_keys", args))
+
+    class FakeDriver:
+        def __init__(self):
+            self.script_calls = []
+
+        def execute_script(self, script, *args):
+            self.script_calls.append((script, args))
+            if "document.execCommand('insertText'" in script:
+                return None
+            return None
+
+    engine = SeleniumLLMBase(
+        service_url="https://www.example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    engine._ensure_ready = lambda: None
+    engine.driver = FakeDriver()
+
+    fake_el = FakeElement()
+    engine._fill_input(engine.driver, fake_el, "test")
+
+    assert any(
+        "document.execCommand('insertText'" in call[0] for call in engine.driver.script_calls
+    )
+    assert ("send_keys", (Keys.SPACE, Keys.BACKSPACE)) in events
+
+
+
 def test_v1_models_unknown():
     response = client.get("/v1/models/nonexistent_engine")
     assert response.status_code == 404
@@ -650,6 +693,103 @@ def test_find_interactable_element_tries_cached_first():
     assert tried_order[0] == cached_sel, "Cached selector must be tried first"
 
 
+def test_find_interactable_element_handles_stale_cached_selector():
+    """If cached selector raises StaleElementReferenceException then fallback is used."""
+    try:
+        from core.selenium_llm_base import SeleniumLLMBase
+    except ModuleNotFoundError:
+        pytest.skip("undetected_chromedriver not compatible with this Python version")
+
+    from selenium.common.exceptions import StaleElementReferenceException
+    from unittest.mock import MagicMock, patch
+
+    base = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    base._cached_prompt_selector = "textarea"
+
+    mock_driver = MagicMock()
+    fake_el = MagicMock()
+
+    selectors_calls = iter(["textarea", "div[contenteditable='true']"])
+
+    def fake_wait_until(condition):
+        try:
+            sel = condition.locator[1]
+        except Exception:
+            sel = next(selectors_calls)
+
+        if sel == "textarea":
+            raise StaleElementReferenceException("stale")
+        if sel == "div[contenteditable='true']":
+            return fake_el
+        from selenium.common.exceptions import TimeoutException
+
+        raise TimeoutException()
+
+    mock_wait = MagicMock()
+    mock_wait.until.side_effect = fake_wait_until
+
+    with patch("core.selenium_llm_base.WebDriverWait", return_value=mock_wait):
+        result = base._find_interactable_element(
+            mock_driver,
+            ["textarea", "div[contenteditable='true']"],
+            timeout=3.0,
+            cache_attr="_cached_prompt_selector",
+        )
+
+    assert result == fake_el
+    assert base._cached_prompt_selector == "div[contenteditable='true']"
+
+
+def test_click_send_handles_stale_first_selector():
+    """If first send selector is stale, next selector should be used and cached."""
+    try:
+        from core.selenium_llm_base import SeleniumLLMBase
+    except ModuleNotFoundError:
+        pytest.skip("undetected_chromedriver not compatible with this Python version")
+
+    from selenium.common.exceptions import StaleElementReferenceException
+    from unittest.mock import MagicMock, patch
+
+    base = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    base.send_button_selectors = ["button.send", "button.send2"]
+    base._cached_send_selector = "button.send"
+
+    mock_driver = MagicMock()
+    fake_btn = MagicMock()
+
+    selectors_calls = iter(["button.send", "button.send2"])
+
+    def fake_wait_until(condition):
+        try:
+            sel = condition.locator[1]
+        except Exception:
+            sel = next(selectors_calls)
+
+        if sel == "button.send":
+            raise StaleElementReferenceException("stale")
+        if sel == "button.send2":
+            return fake_btn
+        from selenium.common.exceptions import TimeoutException
+
+        raise TimeoutException()
+
+    mock_wait = MagicMock()
+    mock_wait.until.side_effect = fake_wait_until
+
+    with patch("core.selenium_llm_base.WebDriverWait", return_value=mock_wait):
+        base._click_send(mock_driver, MagicMock())
+
+    assert base._cached_send_selector == "button.send2"
+
+
 # ---------------------------------------------------------------------------
 # New endpoints: /api/logs/app and updated /stats
 # ---------------------------------------------------------------------------
@@ -826,6 +966,34 @@ def test_post_send_check_returns_false_on_redirect():
 
     result = engine._post_send_check(mock_driver, timeout=0.1)
     assert result is False
+
+
+def test_get_latest_response_text_uses_first_matching_selector():
+    """_get_latest_response_text should return text from the first selector that matches."""
+    from core.selenium_llm_base import SeleniumLLMBase
+    from unittest.mock import MagicMock
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    engine.response_area_selectors = ["div.assistant", "div.alternate"]
+
+    def find_elements(by, value):
+        if value == "div.assistant":
+            return []
+        if value == "div.alternate":
+            el = MagicMock()
+            el.text = "Hello from assistant"
+            return [el]
+        return []
+
+    mock_driver = MagicMock()
+    mock_driver.find_elements.side_effect = find_elements
+
+    result = engine._get_latest_response_text(mock_driver)
+    assert result == "Hello from assistant"
 
 
 def test_sync_generate_response_retries_on_redirect_stall():
@@ -1037,3 +1205,114 @@ def test_skip_split_flag_prevents_recursion():
     # Verify the guard works inside _sync_generate_response_once by inspecting the
     # branch condition: not flag AND should_split → False when flag is True.
     assert not (not engine._skip_split_for_next and engine._should_split_prompt("X" * 500))
+
+
+# ---------------------------------------------------------------------------
+# FIFO queue + no-browser-probe regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_models_no_browser_probe():
+    """/models must not open any browsers when engines are not yet instantiated."""
+    mgr = EngineManager.get()
+    mgr.engines.clear()
+
+    response = client.get("/models")
+    assert response.status_code == 200
+
+    # No engine instance should have been created
+    assert mgr.engines == {}, "Engines should not be instantiated during /models probe"
+
+    data = response.json()
+    assert data["object"] == "list"
+    for entry in data["data"]:
+        assert "limits" in entry, "limits must be present even without a live browser"
+        assert "supported_models" in entry, "supported_models must be present even without a live browser"
+        assert isinstance(entry["limits"]["max_prompt_chars"], int)
+        assert isinstance(entry["supported_models"], list)
+
+
+def test_models_uses_live_data_if_engine_running():
+    """/models must use live engine data when the engine browser is already running."""
+    mgr = EngineManager.get()
+    # DummyEngine is already in mgr.engines from the fixture
+    assert "chatgpt" in mgr.engines
+
+    response = client.get("/models")
+    assert response.status_code == 200
+
+    data = response.json()
+    chatgpt_entry = next(e for e in data["data"] if e["id"] == "chatgpt")
+    # DummyEngine.get_interface_limits() returns max_prompt_chars=1234
+    assert chatgpt_entry["limits"]["max_prompt_chars"] == 1234
+
+
+def test_max_workers_in_descriptor():
+    """EngineDescriptor must expose max_workers (default 1) via to_dict()."""
+    from core.engine_manager import EngineDescriptor
+
+    desc = EngineDescriptor(
+        name="my-engine",
+        aliases=["my-engine"],
+        display_name="My Engine",
+        service_url="https://example.com",
+        models={"default": 10000},
+        default_model="default",
+        source="json",
+        source_path="<test>",
+    )
+    assert desc.max_workers == 1
+    d = desc.to_dict()
+    assert "max_workers" in d
+    assert d["max_workers"] == 1
+
+    desc2 = EngineDescriptor(
+        name="my-engine",
+        aliases=["my-engine"],
+        display_name="My Engine",
+        service_url="https://example.com",
+        models={"default": 10000},
+        default_model="default",
+        source="json",
+        source_path="<test>",
+        max_workers=4,
+    )
+    assert desc2.to_dict()["max_workers"] == 4
+
+
+def test_queue_fifo_serializes_requests():
+    """Concurrent enqueue() calls on the same engine must be serialised FIFO."""
+    from core.engine_manager import EngineManager
+
+    execution_log: list[str] = []
+
+    class OrderedDummyEngine:
+        def get_current_model(self):
+            return "default"
+
+        async def generate_response(self, prompt: str) -> str:
+            # Tiny yield so the event loop can interleave — but should NOT
+            # because the queue serialises
+            await asyncio.sleep(0)
+            execution_log.append(prompt)
+            return f"response-{prompt}"
+
+    async def _run():
+        mgr = EngineManager.get()
+        mgr.engines["chatgpt"] = OrderedDummyEngine()
+        # Clear queue state from previous tests without awaiting tasks that
+        # belong to a different event loop (created by the TestClient).
+        mgr._queue_workers.clear()
+        mgr._job_queues.clear()
+        # Submit three tasks concurrently
+        results = await asyncio.gather(
+            mgr.enqueue("chatgpt", "A"),
+            mgr.enqueue("chatgpt", "B"),
+            mgr.enqueue("chatgpt", "C"),
+        )
+        return results
+
+    results = asyncio.run(_run())
+
+    assert [r.text for r in results] == ["response-A", "response-B", "response-C"]
+    assert execution_log == ["A", "B", "C"], f"FIFO order violated: {execution_log}"
