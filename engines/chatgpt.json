@@ -16,9 +16,9 @@
   },
   "selectors": {
     "prompt_area": [
+      "div.ProseMirror",
       "div.ProseMirror[contenteditable='true']",
       "div[data-testid='prompt-textarea'][contenteditable='true']",
-      "div.ProseMirror",
       "#prompt-textarea",
       "textarea[data-testid='prompt-textarea']",
       "div[contenteditable='true'][data-placeholder]",
