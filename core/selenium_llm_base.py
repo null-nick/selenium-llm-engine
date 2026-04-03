@@ -837,14 +837,21 @@ class SeleniumLLMBase:
         logger.debug(f"[selenium] Filled input ({len(text)} chars)")
 
     def _click_send(self, driver: Any, input_el: Any) -> None:
-        """Click the send button, or fall back to the Enter key."""
+        """Click the send button, or fall back to the Enter key.
+
+        Retries stale element references and transient failures to avoid dropped
+        prompts where the UI updates between finding and clicking the button.
+        """
+        max_attempts = int(os.getenv("SELENIUM_SEND_CLICK_RETRIES", "3"))
 
         def _is_button_blacklisted(btn: Any) -> bool:
             for bl_sel in self.send_button_blacklist:
                 try:
                     matches = driver.find_elements(By.CSS_SELECTOR, bl_sel)
                     if any(m == btn for m in matches):
-                        logger.debug(f"[selenium] Button matches blacklist selector: {bl_sel}")
+                        logger.debug(
+                            f"[selenium] Skipping blacklisted button for selector: {bl_sel}"
+                        )
                         return True
                 except Exception:
                     pass
@@ -852,7 +859,9 @@ class SeleniumLLMBase:
 
         def _safe_click(btn: Any, selector: str) -> bool:
             if _is_button_blacklisted(btn):
-                logger.debug(f"[selenium] Skipping blacklisted button for selector: {selector}")
+                logger.debug(
+                    f"[selenium] Skipping blacklisted button for selector: {selector}"
+                )
                 return False
             try:
                 btn.click()
@@ -879,69 +888,95 @@ class SeleniumLLMBase:
                 pass
             return element
 
-        # Try cached send selector first, then fall through the full list
-        ordered_send: list[str] = list(self.send_button_selectors)
-        if self._cached_send_selector and self._cached_send_selector in ordered_send:
-            ordered_send.remove(self._cached_send_selector)
-            ordered_send.insert(0, self._cached_send_selector)
+        def _attempt_click() -> bool:
+            ordered_send: list[str] = list(self.send_button_selectors)
+            if self._cached_send_selector and self._cached_send_selector in ordered_send:
+                ordered_send.remove(self._cached_send_selector)
+                ordered_send.insert(0, self._cached_send_selector)
 
-        for sel in ordered_send:
-            try:
-                btn = WebDriverWait(driver, 3).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
-                )
-                btn = _resolve_click_target(btn)
+            for sel in ordered_send:
                 try:
-                    if _safe_click(btn, sel):
-                        self._cached_send_selector = sel
-                        return
+                    btn = WebDriverWait(driver, 3).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                    )
+                    btn = _resolve_click_target(btn)
+                    try:
+                        if _safe_click(btn, sel):
+                            self._cached_send_selector = sel
+                            return True
+                    except StaleElementReferenceException as e:
+                        logger.warning(
+                            f"[selenium] Stale send button for selector {sel}; invalidating cache and continuing: {e}"
+                        )
+                        if self._cached_send_selector == sel:
+                            self._cached_send_selector = None
+                        continue
                 except StaleElementReferenceException as e:
                     logger.warning(
-                        f"[selenium] Stale send button for selector {sel}; invalidating cache and continuing: {e}"
+                        f"[selenium] Stale element in clickable wait for {sel}; continuing: {e}"
                     )
                     if self._cached_send_selector == sel:
                         self._cached_send_selector = None
                     continue
+                except Exception as e:
+                    logger.debug(f"[selenium] selector {sel} not clickable: {e}")
+
+            for sel in ordered_send:
+                try:
+                    candidates = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for btn in candidates:
+                        try:
+                            resolved_btn = _resolve_click_target(btn)
+                            if resolved_btn.is_displayed() and resolved_btn.is_enabled():
+                                try:
+                                    if _safe_click(resolved_btn, sel):
+                                        self._cached_send_selector = sel
+                                        return True
+                                except StaleElementReferenceException as e:
+                                    logger.warning(
+                                        f"[selenium] Stale send button in fallback for selector {sel}; continuing: {e}"
+                                    )
+                                    if self._cached_send_selector == sel:
+                                        self._cached_send_selector = None
+                                    continue
+                        except StaleElementReferenceException as e:
+                            logger.warning(
+                                f"[selenium] Stale resolved send button for selector {sel}; continuing: {e}"
+                            )
+                            continue
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(
+                        f"[selenium] selector {sel} not found for fallback click: {e}"
+                    )
+
+            return False
+
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                logger.info(
+                    f"[selenium] _click_send retry {attempt + 1}/{max_attempts}"
+                )
+                self._cached_prompt_selector = None
+                self._cached_send_selector = None
+                time.sleep(0.3)
+
+            try:
+                if _attempt_click():
+                    return
             except StaleElementReferenceException as e:
                 logger.warning(
-                    f"[selenium] Stale element in clickable wait for {sel}; continuing: {e}"
+                    f"[selenium] Stale element during send click attempt, retrying: {e}"
                 )
-                if self._cached_send_selector == sel:
-                    self._cached_send_selector = None
                 continue
             except Exception as e:
-                logger.debug(f"[selenium] selector {sel} not clickable: {e}")
+                logger.warning(
+                    f"[selenium] Error during send click attempt, retrying: {e}"
+                )
+                continue
 
-        # Secondary fallback: try visible buttons even if not clickable by wait
-        for sel in ordered_send:
-            try:
-                candidates = driver.find_elements(By.CSS_SELECTOR, sel)
-                for btn in candidates:
-                    try:
-                        resolved_btn = _resolve_click_target(btn)
-                        if resolved_btn.is_displayed() and resolved_btn.is_enabled():
-                            try:
-                                if _safe_click(resolved_btn, sel):
-                                    self._cached_send_selector = sel
-                                    return
-                            except StaleElementReferenceException as e:
-                                logger.warning(
-                                    f"[selenium] Stale send button in fallback for selector {sel}; continuing: {e}"
-                                )
-                                if self._cached_send_selector == sel:
-                                    self._cached_send_selector = None
-                                continue
-                    except StaleElementReferenceException as e:
-                        logger.warning(
-                            f"[selenium] Stale resolved send button for selector {sel}; continuing: {e}"
-                        )
-                        continue
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.debug(f"[selenium] selector {sel} not found for fallback click: {e}")
-
-        # Final fallback: Enter key on the input element
+        # Final fallback: Enter key on the input element after retries.
         try:
             input_el.send_keys(Keys.RETURN)
             logger.debug("[selenium] Sent via Enter key")
@@ -968,6 +1003,7 @@ class SeleniumLLMBase:
         - URL still on service_url → model is just slow → return True (let _wait_for_response decide).
         """
         baseline = self._get_latest_response_text(driver)
+        timeout = float(os.getenv("SELENIUM_POST_SEND_TIMEOUT", str(timeout)))
         deadline = time.time() + timeout
         while time.time() < deadline:
             # Check stop button
@@ -1016,9 +1052,10 @@ class SeleniumLLMBase:
         """
         baseline = self._get_latest_response_text(driver)
 
+        initial_timeout = float(os.getenv("SELENIUM_RESPONSE_INITIAL_TIMEOUT", "60"))
         start = time.time()
         poll_interval = 0.1
-        while time.time() - start < 30:
+        while time.time() - start < initial_timeout:
             cur = self._get_latest_response_text(driver)
             if cur and cur != baseline:
                 logger.debug("[selenium] New response text appeared")
@@ -1026,7 +1063,11 @@ class SeleniumLLMBase:
             time.sleep(poll_interval)
             poll_interval = min(poll_interval * 2, 1.0)
         else:
-            logger.warning("[selenium] Response area did not produce new text within 30s")
+            logger.warning(
+                f"[selenium] Response area did not produce new text within {initial_timeout}s"
+            )
+
+        max_wait = int(os.getenv("SELENIUM_RESPONSE_MAX_WAIT", str(max_wait)))
 
         start = time.time()
         first_new = ""
