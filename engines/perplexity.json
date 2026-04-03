@@ -5,7 +5,7 @@
   "service_url": "https://www.perplexity.ai",
   "default_model": "default",
   "allow_unlogged": true,
-  "notes": "After a while Perplexity might ask for a login.",
+  "notes": "After a while Perplexity might ask for a login, seems not to be blocking as the chat still works underneath.",
   "models": {
     "unlogged": 15200,
     "default": 32000
