@@ -57,7 +57,9 @@ class _BufferHandler(logging.Handler):
                 _LOG_BUFFER.append(
                     {
                         "seq": _LOG_SEQ,
-                        "time": time.strftime("%H:%M:%S", time.localtime(record.created)),
+                        "time": time.strftime(
+                            "%H:%M:%S", time.localtime(record.created)
+                        ),
                         "level": record.levelname,
                         "name": record.name,
                         "msg": self.format(record),
@@ -167,7 +169,9 @@ def _openai_response(
     }
 
 
-def _openai_chunk(chunk_id: str, model_name: str, content: str, finish_reason: Any) -> str:
+def _openai_chunk(
+    chunk_id: str, model_name: str, content: str, finish_reason: Any
+) -> str:
     """Format a single SSE chunk in OpenAI chat.completion.chunk format."""
     payload = {
         "id": chunk_id,
@@ -358,6 +362,7 @@ def _register_engine_routes(application: FastAPI) -> None:
                     model_name=name,
                     stream=bool(data.get("stream", False)),
                 )
+
             handler.__name__ = f"{name}_prompt"
             return handler
 
@@ -475,9 +480,23 @@ async def _prompt(
         raise HTTPException(status_code=400, detail="Missing prompt/messages")
 
     if isinstance(prompt_text, list):
-        prompt_text = "\n".join(
-            x.get("content", "") if isinstance(x, dict) else str(x) for x in prompt_text
-        )
+        system_parts: list[str] = []
+        user_parts: list[str] = []
+        for x in prompt_text:
+            if isinstance(x, dict):
+                role = x.get("role", "user")
+                content = x.get("content", "")
+                if role == "system":
+                    system_parts.append(content)
+                else:
+                    user_parts.append(content)
+            else:
+                user_parts.append(str(x))
+        parts: list[str] = []
+        if system_parts:
+            parts.append("[INSTRUCTIONS]:\n" + "\n\n".join(system_parts))
+        parts.extend(user_parts)
+        prompt_text = "\n\n".join(parts)
 
     if not isinstance(prompt_text, str):
         prompt_text = str(prompt_text)
@@ -507,7 +526,9 @@ async def _prompt(
                     )
                     inc_responses()
                     chunk_id = f"llm_{int(time.time())}"
-                    yield _openai_chunk(chunk_id, result_obj.model_name, result_obj.text, None)
+                    yield _openai_chunk(
+                        chunk_id, result_obj.model_name, result_obj.text, None
+                    )
                     yield _openai_chunk(chunk_id, result_obj.model_name, "", "stop")
                     yield "data: [DONE]\n\n"
                 except Exception as e:
