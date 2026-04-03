@@ -5,6 +5,7 @@
   "service_url": "https://claude.ai",
   "default_model": "default",
   "allow_unlogged": false,
+  "notes": "Claude needs a phone number to create an account.",
   "models": {
     "default": 16000
   },
