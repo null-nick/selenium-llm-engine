@@ -14,8 +14,8 @@
   },
   "selectors": {
     "prompt_area": [
-      "div[role='textbox'][contenteditable='true']",
       "div[contenteditable='true']",
+      "div[role='textbox'][contenteditable='true']",
       "textarea[aria-label*='Ask']",
       "textarea[placeholder*='What do you want to know']",
       "textarea",
@@ -23,11 +23,11 @@
       "div[aria-label*='Type your message']"
     ],
     "send_button": [
+      "button[type='submit']",
       "button[aria-label*='Send']",
       "button[title*='Send']",
       "button[data-testid*='send']",
       "div[role='button'][aria-label*='Send']",
-      "button[type='submit']",
       "button:not([disabled])"
     ],
     "response_area": [
