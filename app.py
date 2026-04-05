@@ -479,6 +479,8 @@ async def _prompt(
     if not prompt_text:
         raise HTTPException(status_code=400, detail="Missing prompt/messages")
 
+    images_list: list[str] = []
+
     if isinstance(prompt_text, list):
         system_parts: list[str] = []
         user_parts: list[str] = []
@@ -498,7 +500,21 @@ async def _prompt(
                                 info = block["image_url"]
                                 url = info.get("url", "") if isinstance(info, dict) else str(info)
                                 if url:
-                                    extracted.append(f"[Image attachment: {url}]")
+                                    if url.startswith("data:"):
+                                        images_list.append(url)
+                                        extracted.append("[Attached Image: <Base64 attached via clipboard hook>]")
+                                    else:
+                                        extracted.append(f"[Image attachment: {url}]")
+                            elif btype == "input_audio" and "input_audio" in block:
+                                info = block["input_audio"]
+                                data = info.get("data", "")
+                                fmt = info.get("format", "wav")
+                                if data:
+                                    mime = f"audio/{fmt}"
+                                    if fmt == "mp3": mime = "audio/mpeg"
+                                    url = f"data:{mime};base64,{data}"
+                                    images_list.append(url)
+                                    extracted.append(f"[Attached Audio: {fmt} format via clipboard hook]")
                     content = "\n".join(extracted)
                 elif not isinstance(content, str):
                     content = str(content)
@@ -531,7 +547,7 @@ async def _prompt(
 
             async def generate_stream():
                 try:
-                    result_obj = await mgr.enqueue(engine_name, prompt_text)
+                    result_obj = await mgr.enqueue(engine_name, prompt_text, images_list)
                     elapsed_ms = int((time.time() - start) * 1000)
                     log_prompt(
                         engine_name,
@@ -558,7 +574,7 @@ async def _prompt(
 
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
-        result_obj = await mgr.enqueue(engine_name, prompt_text)
+        result_obj = await mgr.enqueue(engine_name, prompt_text, images_list)
         duration_ms = int((time.time() - start) * 1000)
         log_prompt(
             engine_name,

@@ -497,13 +497,13 @@ class SeleniumLLMBase:
             logger.error(f"check_login_state error: {e}")
             return {"logged_in": False, "login_state": "unknown", "error": str(e)}
 
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, images: list[str] = None) -> str:
         """Send prompt to the LLM service and return the response text.
 
         All Selenium calls are executed in a thread pool via asyncio.to_thread
         so that blocking I/O never stalls the FastAPI event loop.
         """
-        return await asyncio.to_thread(self._sync_generate_response, prompt)
+        return await asyncio.to_thread(self._sync_generate_response, prompt, images)
 
     # ------------------------------------------------------------------ session health
 
@@ -642,11 +642,11 @@ class SeleniumLLMBase:
 
     # ------------------------------------------------------------------ core flow
 
-    def _sync_generate_response(self, prompt: str) -> str:
+    def _sync_generate_response(self, prompt: str, images: list[str] = None) -> str:
         """Synchronous core of generate_response — runs in a worker thread."""
         for attempt in range(2):
             try:
-                return self._sync_generate_response_once(prompt)
+                return self._sync_generate_response_once(prompt, images)
             except RuntimeError as e:
                 if attempt == 0:
                     if self._is_dead_session(e):
@@ -664,7 +664,7 @@ class SeleniumLLMBase:
         # Should not be reached, but satisfy mypy
         raise RuntimeError("_sync_generate_response exhausted retries")
 
-    def _sync_generate_response_once(self, prompt: str) -> str:
+    def _sync_generate_response_once(self, prompt: str, images: list[str] = None) -> str:
         """Single attempt of the core generate flow."""
         self._ensure_ready()
 
@@ -719,6 +719,12 @@ class SeleniumLLMBase:
                 raise RuntimeError("Could not find prompt input area")
 
             self._fill_input(driver, input_el, prompt)
+
+            if images:
+                for b64 in images:
+                    self._paste_file(driver, input_el, b64)
+                    time.sleep(1.0) # Wait for engine UI to process the pasted image before submitting
+                    
             self._click_send(driver, input_el)
             if not self._post_send_check(driver):
                 self._cached_prompt_selector = None
@@ -878,6 +884,55 @@ class SeleniumLLMBase:
         except Exception:
             pass
         logger.debug(f"[selenium] Filled input ({len(text)} chars)")
+
+    def _paste_file(self, driver: Any, element: Any, base64_data: str) -> None:
+        """Inject a base64 string as a Clipboard paste event directly into the input element."""
+        try:
+            mime_type = "image/png"
+            if base64_data.startswith("data:"):
+                # Format: data:[<mediatype>][;base64],<data>
+                mime_type = base64_data.split(";")[0].replace("data:", "")
+            
+            b64 = base64_data.split(",")[-1] if "," in base64_data else base64_data
+            
+            ext = mime_type.split("/")[-1] if "/" in mime_type else "img"
+            # Some standard corrections
+            if ext == "mpeg": ext = "mp3"
+            if ext == "jpeg": ext = "jpg"
+            if ext == "plain": ext = "txt"
+
+            js_script = """
+            function pasteFile(base64Data, mimeType, element, ext) {
+                try {
+                    const byteCharacters = atob(base64Data);
+                    const byteNumbers = new Array(byteCharacters.length);
+                    for (let i = 0; i < byteCharacters.length; i++) {
+                        byteNumbers[i] = byteCharacters.charCodeAt(i);
+                    }
+                    const byteArray = new Uint8Array(byteNumbers);
+                    const blob = new Blob([byteArray], {type: mimeType});
+                    const file = new File([blob], "upload." + ext, {type: mimeType});
+                    
+                    const dataTransfer = new DataTransfer();
+                    dataTransfer.items.add(file);
+                    
+                    const pasteEvent = new ClipboardEvent('paste', {
+                        clipboardData: dataTransfer,
+                        bubbles: true,
+                        cancelable: true
+                    });
+                    element.dispatchEvent(pasteEvent);
+                    return true;
+                } catch(e) {
+                    return e.toString();
+                }
+            }
+            return pasteFile(arguments[0], arguments[1], arguments[2], arguments[3]);
+            """
+            driver.execute_script(js_script, b64, mime_type, element, ext)
+            logger.debug(f"[selenium] Injected base64 {mime_type} ({len(b64)} chars) via JS paste hook.")
+        except Exception as e:
+            logger.warning(f"[selenium] Failed to inject base64 image via JS paste hook: {e}")
 
     def _click_send(self, driver: Any, input_el: Any) -> None:
         """Click the send button, or fall back to the Enter key.

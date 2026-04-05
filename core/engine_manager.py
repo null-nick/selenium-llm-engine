@@ -267,6 +267,7 @@ class _PromptJob:
     """A single prompt task placed on a per-engine FIFO queue."""
 
     prompt: str
+    images: list[str]
     future: asyncio.Future  # type: ignore[type-arg]
 
 
@@ -459,7 +460,7 @@ class EngineManager:
             job = await queue.get()
             try:
                 engine = await self.set_active_engine(engine_name)  # lazy-init browser here & teardown previous
-                result_text = await engine.generate_response(job.prompt)
+                result_text = await engine.generate_response(job.prompt, getattr(job, "images", None))
                 model_name = engine.get_current_model()
                 if not job.future.done():
                     job.future.set_result(_PromptResult(text=result_text, model_name=model_name))
@@ -473,8 +474,8 @@ class EngineManager:
             finally:
                 queue.task_done()
 
-    async def enqueue(self, engine_name: str, prompt: str) -> _PromptResult:
-        """Submit *prompt* to the named engine's FIFO queue and await the result.
+    async def enqueue(self, engine_name: str, prompt: str, images: list[str] = None) -> _PromptResult:
+        """Submit *prompt* and optional *images* to the named engine's FIFO queue and await the result.
 
         The engine browser is started lazily by the worker, not by the HTTP
         handler.  Concurrent callers on the same engine are serialised
@@ -484,7 +485,7 @@ class EngineManager:
         queue = self._get_or_create_queue(canonical)
         loop = asyncio.get_event_loop()
         future: asyncio.Future[_PromptResult] = loop.create_future()
-        job = _PromptJob(prompt=prompt, future=future)
+        job = _PromptJob(prompt=prompt, images=images or [], future=future)
         self._ensure_workers(canonical)
         await queue.put(job)
         return await future
