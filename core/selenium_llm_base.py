@@ -22,6 +22,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 logger = logging.getLogger("selenium_llm_base")
 
+# Suppress urllib3 retry warnings — during dead sessions these fire 3x per
+# find_elements call and flood the log with hundreds of identical lines.
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+
 # Global lock that serialises Chrome initialisation across all engine instances.
 # Prevents concurrent _cleanup_chromium_remnants() calls from killing each
 # other's browsers when multiple engines are started simultaneously.
@@ -744,8 +748,9 @@ class SeleniumLLMBase:
                     text = els[-1].text.strip()
                     if text:
                         return text
-            except Exception:
-                pass
+            except Exception as e:
+                if self._is_dead_session(e):
+                    raise  # propagate immediately — stops log spam in polling loops
         return ""
 
     def _find_interactable_element(

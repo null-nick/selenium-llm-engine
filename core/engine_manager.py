@@ -293,6 +293,7 @@ class EngineManager:
         # providing the scaffolding for future parallel-session support.
         self._job_queues: dict[str, asyncio.Queue[_PromptJob]] = {}
         self._queue_workers: dict[str, list[asyncio.Task]] = {}  # type: ignore[type-arg]
+        self._switch_lock = asyncio.Lock()
         self._load_descriptors()
 
     @classmethod
@@ -370,30 +371,31 @@ class EngineManager:
         torn down first so that the new engine's ``_init_driver`` does not
         collide with the still-running Chromium process.
         """
-        canonical = self._resolve(name)
-        previous = self.active_engine
-        new_engine = self.get_engine(canonical)
+        async with self._switch_lock:
+            canonical = self._resolve(name)
+            previous = self.active_engine
+            new_engine = self.get_engine(canonical)
 
-        if previous is not None and previous is not new_engine:
-            prev_name = getattr(previous, "ENGINE_NAME", "unknown")
-            logger.info(
-                f"[engine_manager] Stopping previous active engine '{prev_name}' "
-                f"before switching to '{canonical}'"
-            )
-            try:
-                await previous.stop()
-            except Exception as exc:
-                logger.warning(
-                    f"[engine_manager] Error stopping previous engine '{prev_name}': {exc}"
+            if previous is not None and previous is not new_engine:
+                prev_name = getattr(previous, "ENGINE_NAME", "unknown")
+                logger.info(
+                    f"[engine_manager] Stopping previous active engine '{prev_name}' "
+                    f"before switching to '{canonical}'"
                 )
-            # Remove the dead instance so get_engine() will re-instantiate next time
-            for key, eng in list(self.engines.items()):
-                if eng is previous:
-                    del self.engines[key]
-                    break
+                try:
+                    await previous.stop()
+                except Exception as exc:
+                    logger.warning(
+                        f"[engine_manager] Error stopping previous engine '{prev_name}': {exc}"
+                    )
+                # Remove the dead instance so get_engine() will re-instantiate next time
+                for key, eng in list(self.engines.items()):
+                    if eng is previous:
+                        del self.engines[key]
+                        break
 
-        self.active_engine = new_engine
-        return new_engine
+            self.active_engine = new_engine
+            return new_engine
 
     def set_default_engine(self, name: str) -> str:
         canonical = self._resolve(name)
@@ -456,7 +458,7 @@ class EngineManager:
         while True:
             job = await queue.get()
             try:
-                engine = self.get_engine(engine_name)  # lazy-init browser here
+                engine = await self.set_active_engine(engine_name)  # lazy-init browser here & teardown previous
                 result_text = await engine.generate_response(job.prompt)
                 model_name = engine.get_current_model()
                 if not job.future.done():
