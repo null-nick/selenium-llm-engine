@@ -21,8 +21,11 @@ client = TestClient(app)
 
 
 class DummyEngine:
+    ENGINE_NAME = "dummy"
+
     def __init__(self):
         self.model = "default"
+        self._stopped = False
 
     def get_interface_limits(self):
         return {"max_prompt_chars": 1234, "model_name": "default"}
@@ -38,6 +41,9 @@ class DummyEngine:
 
     async def generate_response(self, prompt):
         return "dummy response"
+
+    async def stop(self):
+        self._stopped = True
 
     def get_current_model(self):
         return "default"
@@ -1316,3 +1322,69 @@ def test_queue_fifo_serializes_requests():
 
     assert [r.text for r in results] == ["response-A", "response-B", "response-C"]
     assert execution_log == ["A", "B", "C"], f"FIFO order violated: {execution_log}"
+
+
+# ---------------------------------------------------------------------------
+# Rapid model switching regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_set_active_engine_stops_previous():
+    """set_active_engine must stop the previous engine before switching."""
+    mgr = EngineManager.get()
+    engine_a = DummyEngine()
+    engine_a.ENGINE_NAME = "chatgpt"
+    engine_b = DummyEngine()
+    engine_b.ENGINE_NAME = "gemini"
+
+    mgr.engines["chatgpt"] = engine_a
+    mgr.engines["gemini"] = engine_b
+    mgr.active_engine = engine_a
+
+    async def _run():
+        return await mgr.set_active_engine("gemini")
+
+    result = asyncio.run(_run())
+    assert result is engine_b
+    assert engine_a._stopped is True, "Previous engine must be stopped on switch"
+    # The stopped engine instance should be removed from engines dict
+    assert engine_a not in mgr.engines.values()
+
+
+def test_set_active_engine_same_engine_is_noop():
+    """Switching to the already-active engine must not call stop()."""
+    mgr = EngineManager.get()
+    engine = DummyEngine()
+    engine.ENGINE_NAME = "chatgpt"
+    mgr.engines["chatgpt"] = engine
+    mgr.active_engine = engine
+
+    async def _run():
+        return await mgr.set_active_engine("chatgpt")
+
+    result = asyncio.run(_run())
+    assert result is engine
+    assert engine._stopped is False, "Same-engine switch must NOT stop the engine"
+
+
+def test_cleanup_chromium_targeted_by_default():
+    """_cleanup_chromium_remnants must NOT run pkill when force_global is False (default)."""
+    from core.selenium_llm_base import SeleniumLLMBase
+    from unittest.mock import patch, MagicMock
+
+    engine = SeleniumLLMBase(
+        service_url="https://example.com",
+        model_limits_map={"default": 1000},
+        default_model="default",
+    )
+    engine._driver_pid = 99999  # fake PID that doesn't exist
+
+    with patch("os.kill") as mock_kill, \
+         patch("subprocess.run") as mock_subprocess:
+        engine._cleanup_chromium_remnants(force_global=False)
+        # Should have attempted to kill only our PID
+        mock_kill.assert_called_once()
+        assert mock_kill.call_args[0][0] == 99999
+        # Should NOT have used pkill
+        mock_subprocess.assert_not_called()
+    assert engine._driver_pid is None

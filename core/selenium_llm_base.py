@@ -57,6 +57,7 @@ class SeleniumLLMBase:
             "CHROMIUM_PROFILE_DIR", "/config/.config/chromium-synth"
         )
         self._last_login_state: Optional[bool] = None
+        self._driver_pid: Optional[int] = None
 
         os.makedirs(self.profile_dir, exist_ok=True)
 
@@ -243,7 +244,7 @@ class SeleniumLLMBase:
                 return self.driver
 
             logger.info("[selenium] Initializing Chrome driver...")
-            self._cleanup_chromium_remnants()
+            self._cleanup_chromium_remnants(force_global=True)
 
             chromium_binary = self._locate_chromium_binary() or "/usr/bin/chromium"
             chromedriver_path = (
@@ -326,35 +327,71 @@ class SeleniumLLMBase:
 
             self.driver.set_page_load_timeout(120)
             self.driver.set_script_timeout(120)
+
+            # Capture the chromedriver subprocess PID for targeted cleanup.
+            try:
+                svc = getattr(self.driver, "service", None)
+                proc = getattr(svc, "process", None)
+                if proc is not None:
+                    self._driver_pid = proc.pid
+                    logger.info(
+                        f"[selenium] Captured driver PID: {self._driver_pid}"
+                    )
+            except Exception:
+                pass
+
             self._initialized = True
             logger.info("[selenium] Driver initialized successfully")
             return self.driver
 
-    def _cleanup_chromium_remnants(self) -> None:
-        """Aggressively clean up Chromium processes and lock files (SyntH pattern)."""
+    def _cleanup_chromium_remnants(self, force_global: bool = False) -> None:
+        """Clean up Chromium processes and lock files.
+
+        By default only kills the chromedriver child process that *this* engine
+        started (stored in ``self._driver_pid``).  When ``force_global`` is
+        True the old indiscriminate ``pkill`` behaviour is used — this should
+        only happen when **no other engines** are running (e.g. container-level
+        reset or initial startup).
+        """
         try:
             logger.info("[selenium] Cleaning up Chromium remnants...")
 
-            # Kill processes aggressively with -9 (SyntH pattern)
-            for pattern in [
-                "chromium",
-                "chrome",
-                "chromedriver",
-                "undetected_chromedriver",
-            ]:
-                try:
-                    subprocess.run(
-                        ["pkill", "-9", "-f", pattern],
-                        check=False,
-                        capture_output=True,
-                        timeout=5,
-                    )
-                except Exception:
-                    pass
+            if not force_global and self._driver_pid is not None:
+                # Targeted cleanup — only kill our own driver tree.
+                import signal
 
-            # Wait for processes to terminate
-            time.sleep(2)
-            logger.info("[selenium] Chromium processes killed")
+                try:
+                    os.kill(self._driver_pid, signal.SIGTERM)
+                    logger.info(
+                        f"[selenium] Sent SIGTERM to driver PID {self._driver_pid}"
+                    )
+                except ProcessLookupError:
+                    pass  # already dead
+                except Exception as e:
+                    logger.warning(
+                        f"[selenium] Failed to SIGTERM PID {self._driver_pid}: {e}"
+                    )
+                self._driver_pid = None
+                time.sleep(1)
+            elif force_global:
+                # Nuclear option — only used during full-system reset.
+                for pattern in [
+                    "chromium",
+                    "chrome",
+                    "chromedriver",
+                    "undetected_chromedriver",
+                ]:
+                    try:
+                        subprocess.run(
+                            ["pkill", "-9", "-f", pattern],
+                            check=False,
+                            capture_output=True,
+                            timeout=5,
+                        )
+                    except Exception:
+                        pass
+                time.sleep(2)
+                logger.info("[selenium] Chromium processes killed (global)")
 
             # Clean up temp dir lock files
             temp_dir = tempfile.gettempdir()
@@ -499,6 +536,7 @@ class SeleniumLLMBase:
                 pass
             self.driver = None
         self._initialized = False
+        self._driver_pid = None
         self._cleanup_chromium_remnants()
 
     def _is_captcha_present(self, driver: Any) -> bool:
@@ -1152,3 +1190,4 @@ class SeleniumLLMBase:
         finally:
             self.driver = None
             self._initialized = False
+            self._driver_pid = None

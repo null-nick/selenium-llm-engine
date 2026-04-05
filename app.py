@@ -299,7 +299,7 @@ async def model_info(engine_name: str) -> Dict[str, Any]:
 @app.post("/login/{engine_name}")
 async def login_engine(engine_name: str) -> Dict[str, Any]:
     try:
-        engine = EngineManager.get().set_active_engine(engine_name)
+        engine = await EngineManager.get().set_active_engine(engine_name)
     except ValueError:
         raise HTTPException(status_code=404, detail="Engine not found")
 
