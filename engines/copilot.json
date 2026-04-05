@@ -38,7 +38,7 @@
     ]
   },
   "login_detection": {
-    "url_prefix": "https://copilot.microsoft.com/login",
+    "url_prefix": "https://copilot.microsoft.com",
     "url_deny_keywords": ["login", "signin", "auth"],
     "login_button_xpath": "//button[@data-testid='sidebar-settings-button' or @title='Sign in' or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'log in') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'get started') ]",
     "authenticated_css_selectors": ["div.group\\/ai-message", "div.chat-message.ai", "div[data-testid='conversation-container']"]

@@ -2,7 +2,7 @@
   "name": "grok",
   "display_name": "Grok (xAI)",
   "aliases": ["grok", "xai"],
-  "service_url": "https://grok.com/c",
+  "service_url": "https://grok.com/",
   "default_model": "grok-4.0",
   "allow_unlogged": true,
   "notes": "Probably the worst engine: keeps redirecting making it the slowest engine.",
@@ -51,7 +51,7 @@
     ]
   },
   "login_detection": {
-    "url_prefix": "https://accounts.x.ai/sign-in?redirect=grok-com",
+    "url_prefix": "https://grok.com",
     "url_deny_keywords": ["signin", "login", "auth"],
     "login_button_xpath": "//a[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign in') or contains(@href, 'sign-in') or @data-slot='button']",
     "authenticated_css_selectors": [
