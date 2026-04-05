@@ -163,6 +163,31 @@ docker compose up --build
 
 This runs the same service under `http://localhost:14848` (and `http://localhost:3006` for webtop).
 
+## Production deploy (nginx + SSL)
+
+A ready-to-use production stack with self-signed SSL is provided in `deploy/`:
+
+```bash
+# Default (CN=localhost)
+./deploy/start.sh
+
+# Custom hostname / IP
+./deploy/start.sh 192.168.0.100
+```
+
+This creates:
+- **nginx** reverse proxy with SSL on ports `443` / `80`
+- **selenium-llm-engine** with API on port `14848` (direct) and webtop exposed only to nginx
+- Self-signed certificate generated automatically in `deploy/certs/`
+- Local bind-mount volumes in `deploy/data/` and `deploy/config/`
+
+Access points:
+- `https://<host>` — Web UI (via nginx, HTTPS)
+- `http://<host>:14848` — API (direct, no SSL)
+
+To stop: `docker compose -f deploy/docker-compose.yml down`
+
+
 ## Notes
 
 - Requires Chromium + chromedriver and undetected-chromedriver.
@@ -187,6 +212,7 @@ pytest -q
 - `app.py` - FastAPI entrypoint
 - `core/` - Selenium engine wrappers and manager
 - `db/` - SQLite persistence helpers
+- `deploy/` - Production deploy (nginx + SSL + docker-compose)
 - `web/` - minimal static UI
 - `tests/` - API tests
 - `Dockerfile`, `docker-compose.yml` - container setup

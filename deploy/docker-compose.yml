@@ -1,0 +1,41 @@
+# deploy/docker-compose.yml — Production stack with nginx SSL reverse proxy
+#
+# Usage:
+#   cd deploy && ../deploy/start.sh
+#   # or manually:
+#   docker compose up -d
+
+services:
+  nginx:
+    image: nginx:latest
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs/selkies.crt:/etc/nginx/certs/selkies.crt:ro
+      - ./certs/selkies.key:/etc/nginx/certs/selkies.key:ro
+    depends_on:
+      - selenium-llm-engine
+    restart: unless-stopped
+    networks:
+      - selenium-net
+
+  selenium-llm-engine:
+    image: xargonwan/selenium-llm-engine:latest
+    ports:
+      - "14848:8000"   # API (direct, bypasses nginx)
+    expose:
+      - "3000"         # Webtop frontend (nginx only)
+    volumes:
+      - ./data:/app/data
+      - ./config:/config
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - selenium-net
+
+networks:
+  selenium-net:
+    driver: bridge
