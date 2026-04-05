@@ -486,6 +486,23 @@ async def _prompt(
             if isinstance(x, dict):
                 role = x.get("role", "user")
                 content = x.get("content", "")
+                
+                if isinstance(content, list):
+                    extracted = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            btype = block.get("type")
+                            if btype == "text" and "text" in block:
+                                extracted.append(str(block.get("text", "")))
+                            elif btype == "image_url" and "image_url" in block:
+                                info = block["image_url"]
+                                url = info.get("url", "") if isinstance(info, dict) else str(info)
+                                if url:
+                                    extracted.append(f"[Image attachment: {url}]")
+                    content = "\n".join(extracted)
+                elif not isinstance(content, str):
+                    content = str(content)
+
                 if role == "system":
                     system_parts.append(content)
                 else:
