@@ -35,6 +35,7 @@ Feel free to submit pull requests with improvements, new engines, or engine defi
   - `/api/logs/app` (incremental app log polling)
   - `/api/engines/selector-hints` (runtime selector hints)
   - `/reset` and `/api/reset` (clears engine state and stats counters)
+  - `/api/session/kill` (force-kills frozen browser session processes)
   - `/logs` and `/api/history`
   - `/ui`
 - SQLite storage for prompt logs and counters
@@ -52,7 +53,7 @@ docker pull xargonwan/selenium-llm-engine:latest
 
 docker run -d --name selenium-llm-engine \
   -p 14848:8000 \
-  -p 3006:3000 \
+  -p 3001:3000 \
   -v data:/app/data \
   -v config:/config \
   xargonwan/selenium-llm-engine:latest
@@ -114,6 +115,48 @@ payload = {
 
 r = requests.post(url, json=payload)
 print(r.json())
+```
+
+## Media upload support
+
+`/v1/chat/completions` (and legacy per-engine `/chatgpt/prompt`, `/gemini/prompt`, etc.) accepts multimodal `messages` payloads where a message `content` can be an array of parts:
+
+- `type: "text"` for text content
+- `type: "image_url"` for an inline image using a data URI or raw base64 payload
+- `type: "input_audio"` for audio upload in supported engines
+
+Example `curl` request with an inline image:
+
+```bash
+curl -X POST "http://localhost:14848/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "chatgpt",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "content": "Here is an image:"},
+          {
+            "type": "image_url",
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=",
+            "filename": "example.png"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+If the chosen engine supports audio uploads, use `type: "input_audio"` with a base64 audio payload and optional `mime_type`:
+
+```json
+{
+  "type": "input_audio",
+  "data": "<base64-audio-data>",
+  "mime_type": "audio/mpeg",
+  "filename": "example.mp3"
+}
 ```
 
 3. Prompt example (API call)
@@ -214,5 +257,40 @@ pytest -q
 - `db/` - SQLite persistence helpers
 - `deploy/` - Production deploy (nginx + SSL + docker-compose)
 - `web/` - minimal static UI
-- `tests/` - API tests
+- `tests/` - API tests and `stress_test.py` (manual, excluded from CI)
 - `Dockerfile`, `docker-compose.yml` - container setup
+
+## Stress Test Results
+
+A ramp-up stress test was run against the live system with the following setup:
+- 10 long prompts (~3,000–8,000 chars each) sent to Gemini with delays ramping from 30s down to 0s
+- 10 long prompts sent to ChatGPT (same ramp-up pattern)
+- 5 prompts each sent in burst to: claude, copilot, perplexity, stepfun, grok
+
+### Average Response Times
+
+| Engine | Avg Response | Notes |
+|--------|-------------|-------|
+| copilot | 16.9s | Fastest, but unstable under load |
+| perplexity | 35.2s | Moderately stable |
+| chatgpt (unlogged) | 71.1s | Slow, high variance (42–426s) |
+| claude (unlogged) | 79.0s | Error-prone in unlogged mode |
+| gemini | 94.8s | Slowest but most reliable |
+
+### System Soliditude
+
+- **FIFO queue**: No race conditions detected; requests to each engine are processed sequentially and correctly.
+- **Per-engine parallelism**: Each engine processes independently; no cross-engine interference.
+- **Failure modes**: The dominant failure cause is `fill_input` verification rejecting long prompts that the target site reformats (e.g., ChatGPT truncating or reformatting prompt text before sending). A secondary issue is a `Connection pool is full` warning indicating a single-connection pool to the Chrome driver, which creates a bottleneck during burst traffic.
+- **Engines requiring login**: stepfun, grok, and (partially) claude are unreliable or non-functional without authenticated sessions.
+
+### Overall Assessment
+
+The system handles concurrent load across multiple engines without deadlocks or queue corruption. The FIFO queue is the strongest component. Browser stability under sustained burst traffic is the main fragility — driven by input verification strictness and connection pool limitations rather than the queue itself.
+
+## Legal / Terms of Service (ToS) Notice
+
+- This software is intended for research and testing purposes only.
+- Before using this tool with any online service, verify and comply with that service's Terms of Service (ToS) and usage policies.
+- If the target service does not allow automated access or use via browser automation, do not use this software against it.
+- Always respect copyright and service contract requirements.

@@ -1,9 +1,13 @@
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Set
 
@@ -14,16 +18,20 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
+
+
 from db.db import (
     clear_prompt_logs,
     clear_stats,
     get_logged_engines,
+    get_media_sent_today,
     get_prompt_logs,
     get_response_time_stats,
     get_stats,
     init_database,
     log_prompt,
     inc_errors,
+    inc_media_sent,
     inc_requests,
     inc_responses,
 )
@@ -69,6 +77,214 @@ class _BufferHandler(logging.Handler):
             self.handleError(record)
 
 
+@dataclass
+class MediaItem:
+    media_type: str
+    data: bytes
+    mime_type: str
+    filename: str
+
+
+def _parse_data_uri(data_uri: str) -> tuple[bytes, str]:
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
+        raise ValueError("Invalid data URI")
+    header, _, payload = data_uri.partition(",")
+    if not payload:
+        raise ValueError("Malformed data URI")
+    if ";base64" not in header:
+        raise ValueError("Only base64-encoded data URIs are supported")
+    mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
+    return base64.b64decode(payload), mime_type
+
+
+def _guess_filename(media_type: str, mime_type: str, index: int) -> str:
+    extension = mimetypes.guess_extension(mime_type) or ""
+    if not extension:
+        extension = ".bin"
+    return f"{media_type}_{index}{extension}"
+
+
+def _map_media_capabilities_to_model_caps(media_capabilities: list[str]) -> dict[str, bool]:
+    capabilities: dict[str, bool] = {}
+    if "image" in media_capabilities:
+        capabilities["vision"] = True
+    if "audio" in media_capabilities:
+        capabilities["audio"] = True
+    return capabilities
+
+
+def _parse_media_part(part: dict, index: int) -> MediaItem:
+    raw_media_type = str(part.get("type", "")).strip()
+    if not raw_media_type:
+        mime_type_hint = str(part.get("mime_type") or part.get("content_type") or "").strip().lower()
+        if mime_type_hint.startswith("image/"):
+            raw_media_type = "image"
+        elif mime_type_hint.startswith("audio/"):
+            raw_media_type = "audio"
+        elif mime_type_hint:
+            raw_media_type = "input_file"
+
+    if raw_media_type in ("image_url", "image"):
+        media_type = "image"
+    elif raw_media_type in ("input_audio", "audio"):
+        media_type = "audio"
+    elif raw_media_type in ("input_file", "file", "document", "input_document"):
+        media_type = "document"
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported media type: {raw_media_type}")
+
+    if media_type == "image":
+        # Support both flat {"url": "..."} and OpenAI vision {"image_url": {"url": "..."}}
+        image_url_nested = part.get("image_url")
+        source = (
+            part.get("url")
+            or part.get("data")
+            or (image_url_nested.get("url") if isinstance(image_url_nested, dict) else None)
+        )
+        if not source:
+            raise HTTPException(status_code=400, detail="Missing image URL or data")
+    else:
+        source = part.get("data")
+        if not source:
+            raise HTTPException(status_code=400, detail="Missing file data")
+
+    if isinstance(source, str) and source.startswith("data:"):
+        try:
+            data, mime_type = _parse_data_uri(source)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif isinstance(source, str):
+        try:
+            data = base64.b64decode(source)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid base64 media data") from exc
+        if media_type == "audio":
+            mime_type = part.get("mime_type") or "audio/mpeg"
+        else:
+            mime_type = part.get("mime_type") or "application/octet-stream"
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported media payload format")
+
+    filename = str(part.get("filename") or _guess_filename(media_type, mime_type, index))
+    return MediaItem(media_type=media_type, data=data, mime_type=mime_type, filename=filename)
+
+
+def _try_parse_json_string(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed or trimmed[0] not in ("{", "["):
+        return value
+    try:
+        parsed = json.loads(trimmed)
+        logger.debug("[selenium] Parsed JSON string content into structured payload")
+        return parsed
+    except Exception:
+        return value
+
+
+def _is_media_part(part: Any) -> bool:
+    if not isinstance(part, dict):
+        return False
+    raw_media_type = str(part.get("type", "")).strip().lower()
+    if raw_media_type in (
+        "image_url",
+        "image",
+        "input_audio",
+        "audio",
+        "input_file",
+        "file",
+        "document",
+        "input_document",
+    ):
+        return True
+    mime_type = str(part.get("mime_type") or part.get("content_type") or "").strip().lower()
+    return bool(mime_type and (mime_type.startswith("image/") or mime_type.startswith("audio/") or mime_type.startswith("video/") or mime_type.startswith("application/")))
+
+
+def _extract_text_and_media(content: Any, media_items: list[MediaItem]) -> str:
+    content = _try_parse_json_string(content)
+    if isinstance(content, dict):
+        if _is_media_part(content):
+            try:
+                media_items.append(_parse_media_part(content, len(media_items)))
+                logger.debug("[selenium] Extracted media part from structured payload")
+            except HTTPException:
+                pass
+            return ""
+
+        text_parts: list[str] = []
+        attachments = content.get("attachments")
+        if isinstance(attachments, list):
+            for attachment in attachments:
+                if _is_media_part(attachment):
+                    try:
+                        media_items.append(_parse_media_part(attachment, len(media_items)))
+                        logger.debug("[selenium] Extracted media attachment from attachments array")
+                    except HTTPException:
+                        pass
+                else:
+                    text_parts.append(_extract_text_and_media(attachment, media_items))
+
+        if "content" in content:
+            text_parts.append(_extract_text_and_media(content["content"], media_items))
+        if "text" in content and content["text"] is not content.get("content"):
+            text_parts.append(_extract_text_and_media(content["text"], media_items))
+
+        # Only recurse into 'parts' or 'messages' if they exist, but avoid
+        # generic iteration over all keys to prevent metadata/internal field leakage.
+        for key in ("parts", "messages"):
+            if key in content and isinstance(content[key], list):
+                text_parts.append(_extract_text_and_media(content[key], media_items))
+
+        return "".join(text_parts)
+
+    if isinstance(content, list):
+        return "".join(_extract_text_and_media(item, media_items) for item in content)
+
+    return str(content)
+
+
+def _normalize_prompt_payload(payload: Any) -> tuple[str, list[MediaItem]]:
+    prompt_text = ""
+    media_items: list[MediaItem] = []
+
+    if isinstance(payload, dict) and "role" in payload and "content" in payload:
+        payload = [payload]
+
+    if isinstance(payload, list):
+        system_parts: list[str] = []
+        user_parts: list[str] = []
+        for message in payload:
+            role = "user"
+            content = message
+            if isinstance(message, dict):
+                role = str(message.get("role", "user"))
+                content = message.get("content", "")
+
+            message_text = _extract_text_and_media(content, media_items)
+
+            if role == "system":
+                if message_text:
+                    system_parts.append(message_text)
+            else:
+                if message_text:
+                    user_parts.append(message_text)
+
+        parts: list[str] = []
+        if system_parts:
+            parts.append("[INSTRUCTIONS]:\n" + "\n\n".join(system_parts))
+        if user_parts:
+            parts.extend(user_parts)
+        prompt_text = "\n\n".join(parts)
+    else:
+        prompt_text = _extract_text_and_media(payload, media_items)
+
+    if not prompt_text and media_items:
+        prompt_text = "[Media attachments included]"
+    return prompt_text, media_items
+
+
 _buf_handler = _BufferHandler()
 _buf_handler.setLevel(logging.DEBUG)
 
@@ -78,7 +294,26 @@ logging.getLogger().addHandler(_buf_handler)
 
 logger = logging.getLogger("selenium-llm-api")
 
-app = FastAPI(title="Selenium LLM Engine", version="0.1")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):  # type: ignore[type-arg]
+    # ---- startup ----
+    init_database()
+    EngineManager.get()           # initialize manager
+    _register_engine_routes(app)  # dynamic per-engine /name/prompt routes
+    yield
+    # ---- shutdown ----
+    # Gracefully quit all Chrome instances so they can flush cookies/profile to
+    # disk before the container is killed.  This keeps login sessions alive
+    # across docker stop / docker restart.
+    try:
+        manager = EngineManager.get()
+        await asyncio.wait_for(manager.stop_all(), timeout=15)
+    except Exception as exc:
+        logger.warning(f"[shutdown] stop_all error: {exc}")
+
+
+app = FastAPI(title="Selenium LLM Engine", version="0.1", lifespan=_lifespan)
 
 # Rate limiting (per ip, sliding window)
 RATE_LIMIT_WINDOW = 60  # seconds
@@ -189,11 +424,7 @@ def _openai_chunk(
     return f"data: {json.dumps(payload)}\n\n"
 
 
-@app.on_event("startup")
-async def startup_event() -> None:
-    init_database()
-    EngineManager.get()  # initialize manager
-    _register_engine_routes(app)  # dynamic per-engine /name/prompt routes
+
 
 
 @app.get("/")
@@ -212,6 +443,36 @@ async def api_engines() -> Dict[str, Any]:
     """List all discovered engines with metadata (no browser started)."""
     mgr = EngineManager.get()
     return {"data": mgr.list_engines()}
+
+
+@app.get("/api/debug/page-html", response_class=HTMLResponse)
+async def api_debug_page_html(engine_name: str | None = None) -> HTMLResponse:
+    """Return the current page HTML from the requested engine's browser session."""
+    mgr = EngineManager.get()
+    try:
+        if engine_name:
+            engine = mgr.get_engine(engine_name)
+        else:
+            engine = mgr.get_active_engine()
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    driver = getattr(engine, "driver", None)
+    if not driver:
+        raise HTTPException(
+            status_code=404,
+            detail="No active browser session for the selected engine",
+        )
+
+    try:
+        html = driver.page_source
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not retrieve page source: {exc}",
+        )
+
+    return HTMLResponse(content=html)
 
 
 @app.get("/api/engines/default")
@@ -267,6 +528,9 @@ async def models() -> LegacyModelList:
             "owned_by": "selenium-llm-engine",
             # Legacy extra fields (kept for backward compat)
             "name": engine_name,
+            "capabilities": _map_media_capabilities_to_model_caps(
+                list(desc.get("media_capabilities", []))
+            ),
         }
         # Use live engine data if the browser is already running, otherwise
         # fall back to the descriptor metadata (avoids opening browsers on probe).
@@ -335,6 +599,7 @@ async def engine_prompt(engine_name: str, req: Request) -> Any:
         explicit_prompt=data.get("prompt") or data.get("messages"),
         model_name=data.get("model", canonical),
         stream=bool(data.get("stream", False)),
+        timeout=data.get("timeout"),
     )
 
 
@@ -361,6 +626,7 @@ def _register_engine_routes(application: FastAPI) -> None:
                     explicit_prompt=data.get("prompt") or data.get("messages"),
                     model_name=name,
                     stream=bool(data.get("stream", False)),
+                    timeout=data.get("timeout"),
                 )
 
             handler.__name__ = f"{name}_prompt"
@@ -390,6 +656,9 @@ async def v1_models() -> ModelList:
                 object="model",
                 created=created,
                 owned_by="selenium-llm-engine",
+                capabilities=_map_media_capabilities_to_model_caps(
+                    list(desc.get("media_capabilities", []))
+                ),
             )
         )
     return ModelList(object="list", data=entries)
@@ -444,7 +713,8 @@ async def openai_chat(req: Request) -> Any:
     stream = bool(data.get("stream", False))
 
     return await _prompt(
-        engine, req, explicit_prompt=prompt_payload, model_name=model, stream=stream
+        engine, req, explicit_prompt=prompt_payload, model_name=model, stream=stream,
+        timeout=data.get("timeout"),
     )
 
 
@@ -460,6 +730,7 @@ async def _prompt(
     explicit_prompt: Any = None,
     model_name: str = "default",
     stream: bool = False,
+    timeout: int | None = None,
 ) -> Any:
     if RESET_IN_PROGRESS:
         raise HTTPException(
@@ -472,64 +743,16 @@ async def _prompt(
 
     if explicit_prompt is None:
         payload = await _safe_parse_json(req)
-        prompt_text = payload.get("prompt") or payload.get("messages")
+        prompt_payload = payload.get("prompt") or payload.get("messages")
     else:
-        prompt_text = explicit_prompt
+        prompt_payload = explicit_prompt
 
-    if not prompt_text:
+    if prompt_payload is None:
         raise HTTPException(status_code=400, detail="Missing prompt/messages")
 
-    images_list: list[str] = []
-
-    if isinstance(prompt_text, list):
-        system_parts: list[str] = []
-        user_parts: list[str] = []
-        for x in prompt_text:
-            if isinstance(x, dict):
-                role = x.get("role", "user")
-                content = x.get("content", "")
-                
-                if isinstance(content, list):
-                    extracted = []
-                    for block in content:
-                        if isinstance(block, dict):
-                            btype = block.get("type")
-                            if btype == "text" and "text" in block:
-                                extracted.append(str(block.get("text", "")))
-                            elif btype == "image_url" and "image_url" in block:
-                                info = block["image_url"]
-                                url = info.get("url", "") if isinstance(info, dict) else str(info)
-                                if url:
-                                    if url.startswith("data:"):
-                                        images_list.append(url)
-                                        extracted.append("[Attached Image: <Base64 attached via clipboard hook>]")
-                                    else:
-                                        extracted.append(f"[Image attachment: {url}]")
-                            elif btype == "input_audio" and "input_audio" in block:
-                                info = block["input_audio"]
-                                data = info.get("data", "")
-                                fmt = info.get("format", "wav")
-                                if data:
-                                    mime = f"audio/{fmt}"
-                                    if fmt == "mp3": mime = "audio/mpeg"
-                                    url = f"data:{mime};base64,{data}"
-                                    images_list.append(url)
-                                    extracted.append(f"[Attached Audio: {fmt} format via clipboard hook]")
-                    content = "\n".join(extracted)
-                elif not isinstance(content, str):
-                    content = str(content)
-
-                if role == "system":
-                    system_parts.append(content)
-                else:
-                    user_parts.append(content)
-            else:
-                user_parts.append(str(x))
-        parts: list[str] = []
-        if system_parts:
-            parts.append("[INSTRUCTIONS]:\n" + "\n\n".join(system_parts))
-        parts.extend(user_parts)
-        prompt_text = "\n\n".join(parts)
+    prompt_text, media_items = _normalize_prompt_payload(prompt_payload)
+    if not prompt_text and not media_items:
+        raise HTTPException(status_code=400, detail="Missing prompt/messages")
 
     if not isinstance(prompt_text, str):
         prompt_text = str(prompt_text)
@@ -547,8 +770,24 @@ async def _prompt(
 
             async def generate_stream():
                 try:
-                    result_obj = await mgr.enqueue(engine_name, prompt_text, images_list)
+                    result_future = asyncio.ensure_future(
+                        mgr.enqueue(engine_name, prompt_text, media_items,
+                                    timeout=timeout)
+                    )
+
+                    heartbeat_interval = 5.0
+                    while not result_future.done():
+                        done, _ = await asyncio.wait(
+                            {result_future},
+                            timeout=heartbeat_interval,
+                        )
+                        if not done:
+                            yield ": heartbeat\n\n"
+
+                    result_obj = result_future.result()
                     elapsed_ms = int((time.time() - start) * 1000)
+                    if media_items:
+                        inc_media_sent(len(media_items))
                     log_prompt(
                         engine_name,
                         result_obj.model_name,
@@ -574,8 +813,11 @@ async def _prompt(
 
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
-        result_obj = await mgr.enqueue(engine_name, prompt_text, images_list)
+        result_obj = await mgr.enqueue(engine_name, prompt_text, media_items,
+                                        timeout=timeout)
         duration_ms = int((time.time() - start) * 1000)
+        if media_items:
+            inc_media_sent(len(media_items))
         log_prompt(
             engine_name,
             result_obj.model_name,
@@ -618,10 +860,51 @@ async def _prompt(
             _unregister_task(current_task)
 
 
+def _get_media_availability() -> Dict[str, int]:
+    mgr = EngineManager.get()
+    totals = {"unlogged": 0, "base": 0, "paid": 0}
+    unlimited = {"unlogged": False, "paid": False}
+    for desc in mgr._descriptors.values():
+        media_support = getattr(desc, "media_support", {}) or {}
+        if not isinstance(media_support, dict):
+            continue
+        engine_totals = {"unlogged": 0, "base": 0, "paid": 0}
+        engine_unknown_base = False
+        for cfg in media_support.values():
+            if not isinstance(cfg, dict):
+                continue
+            limits = cfg.get("limits", {})
+            if not isinstance(limits, dict):
+                continue
+            for tier in engine_totals:
+                value = limits.get(tier)
+                if value == -1:
+                    if tier == "base":
+                        engine_unknown_base = True
+                    else:
+                        unlimited[tier] = True
+                elif isinstance(value, int) and value > 0:
+                    engine_totals[tier] += value
+        totals["base"] += engine_totals["base"]
+        if engine_unknown_base:
+            totals["base"] += 2
+        totals["unlogged"] += engine_totals["unlogged"]
+        totals["paid"] += engine_totals["paid"]
+    result: Dict[str, int] = {}
+    for tier, amount in totals.items():
+        if tier in unlimited and unlimited[tier]:
+            result[tier] = -1
+        else:
+            result[tier] = amount
+    return result
+
+
 @app.get("/stats")
 async def stats() -> Dict[str, Any]:
     return {
         "stats": get_stats(),
+        "media_sent_today": get_media_sent_today(),
+        "media_availability": _get_media_availability(),
         "logged_engines": get_logged_engines(),
         "response_time": get_response_time_stats(),
     }
@@ -704,6 +987,52 @@ async def reset_state() -> Dict[str, Any]:
 @app.post("/api/reset")
 async def api_reset_state() -> Dict[str, Any]:
     return await reset_state()
+
+
+@app.post("/api/session/kill")
+async def kill_session() -> Dict[str, Any]:
+    """Force-kill the browser session immediately (SIGKILL).
+
+    Use this when the browser is completely frozen and normal reset
+    doesn't work.  Engine instances stay in memory and will
+    auto-reinitialise the browser on the next request.
+    """
+    from core.selenium_llm_base import force_kill_session
+
+    manager = EngineManager.get()
+    errors: list[str] = []
+
+    # Drain queues so pending jobs don't pile up on the dead session
+    try:
+        await manager.drain_queues()
+    except Exception as e:
+        logger.warning(f"[kill_session] drain_queues error: {e}")
+        errors.append(f"drain: {e}")
+
+    # Invalidate driver references on all engine instances
+    for name, engine in manager.engines.items():
+        try:
+            engine.driver = None
+            engine._initialized = False
+            engine._cookies_restored = False
+        except Exception as e:
+            logger.warning(f"[kill_session] clear engine {name}: {e}")
+            errors.append(f"engine_{name}: {e}")
+
+    # Force-kill browser processes
+    try:
+        await asyncio.to_thread(force_kill_session)
+    except Exception as e:
+        logger.error(f"[kill_session] force_kill_session error: {e}")
+        errors.append(f"kill: {e}")
+
+    message = (
+        "Browser session killed — next request will start a new session"
+        if not errors
+        else f"Browser session killed (with errors: {'; '.join(errors)})"
+    )
+    logger.info(f"[kill_session] {message}")
+    return {"status": "ok", "message": message}
 
 
 @app.get("/logs")

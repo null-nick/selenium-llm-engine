@@ -1,7 +1,10 @@
 import asyncio
+import concurrent.futures
 import glob
 import logging
+import json
 import math
+import mimetypes
 import os
 import shutil
 import subprocess
@@ -16,7 +19,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -30,6 +34,108 @@ logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 # Prevents concurrent _cleanup_chromium_remnants() calls from killing each
 # other's browsers when multiple engines are started simultaneously.
 _CHROMIUM_INIT_LOCK = threading.Lock()
+
+# Shared Chrome driver instance — all engine instances reuse the same browser
+# to avoid profile-dir lock conflicts and preserve login sessions across engines.
+_shared_driver: Optional[Any] = None
+
+
+def shutdown_shared_driver() -> None:
+    """Quit the shared Chrome driver and clean up all Chromium processes.
+
+    Called once by :meth:`EngineManager.stop_all` during application shutdown.
+    """
+    global _shared_driver
+    with _CHROMIUM_INIT_LOCK:
+        drv = _shared_driver
+        _shared_driver = None
+    if drv is not None:
+        # Use a timeout so we don't hang on a dead ChromeDriver process.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(drv.quit)
+            try:
+                fut.result(timeout=5)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "[selenium] shared driver quit() timed out after 5s"
+                )
+            except Exception as exc:
+                logger.warning("[selenium] shared driver quit error: %s", exc)
+    # Kill any remaining Chromium processes and remove lock files.
+    profile_dir = os.getenv(
+        "CHROMIUM_PROFILE_DIR", "/config/.config/chromium-synth"
+    )
+    patterns = [profile_dir] if profile_dir else [
+        "chromium", "chrome", "chromedriver", "undetected_chromedriver",
+    ]
+    for pattern in patterns:
+        try:
+            subprocess.run(
+                ["pkill", "-15", "-f", pattern],
+                check=False, capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+    time.sleep(3)
+    for pattern in patterns:
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                check=False, capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+    logger.info("[selenium] Shared driver shut down")
+
+
+def force_kill_session() -> None:
+    """Immediately SIGKILL the shared browser session without trying ``quit()``.
+
+    This is the "nuclear" option for when the browser is completely frozen
+    and ``driver.quit()`` would hang.  It:
+
+    1. Nullifies ``_shared_driver`` under the init lock.
+    2. Sends SIGKILL to all Chromium / ChromeDriver processes.
+    3. Cleans up lock files from the profile directory.
+
+    Engine instances remain in memory but their ``driver`` reference is
+    stale — the next request will automatically re-initialise the browser.
+    """
+    global _shared_driver
+    logger.warning("[selenium] force_kill_session invoked — SIGKILL mode")
+    with _CHROMIUM_INIT_LOCK:
+        _shared_driver = None
+
+    profile_dir = os.getenv(
+        "CHROMIUM_PROFILE_DIR", "/config/.config/chromium-synth"
+    )
+    patterns = [profile_dir] if profile_dir else [
+        "chromium", "chrome", "chromedriver", "undetected_chromedriver",
+    ]
+    for pattern in patterns:
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                check=False, capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+
+    # Remove lock files that would prevent a clean restart
+    if profile_dir:
+        lock_patterns = [
+            os.path.join(profile_dir, "SingletonLock"),
+            os.path.join(profile_dir, "SingletonCookie"),
+            os.path.join(profile_dir, "SingletonSocket"),
+        ]
+        for lock in lock_patterns:
+            try:
+                if os.path.exists(lock):
+                    os.remove(lock)
+            except Exception:
+                pass
+
+    logger.info("[selenium] force_kill_session complete — browser processes killed")
 
 
 class SeleniumLLMBase:
@@ -47,6 +153,8 @@ class SeleniumLLMBase:
         self.default_model = default_model
         self.allow_unlogged = allow_unlogged
         self.driver = None
+        self.media_config: dict[str, Any] = {}
+        self.paid_account_selector: Optional[str] = None
 
         if headless is None:
             env_headless = os.getenv("CHROMIUM_HEADLESS", "0")
@@ -57,13 +165,17 @@ class SeleniumLLMBase:
         else:
             self.headless = headless
         self._initialized = False
+
         self.profile_dir = profile_dir or os.getenv(
             "CHROMIUM_PROFILE_DIR", "/config/.config/chromium-synth"
         )
-        self._last_login_state: Optional[bool] = None
         self._driver_pid: Optional[int] = None
 
+
         os.makedirs(self.profile_dir, exist_ok=True)
+        logger.info(f"[selenium] Chrome profile_dir={self.profile_dir}")
+
+        self._last_login_state: Optional[bool] = None
 
         # Selector lists used by _sync_generate_response — override in subclasses.
         self.prompt_area_selectors: list[str] = [
@@ -82,6 +194,8 @@ class SeleniumLLMBase:
             "button[aria-label*='Stop']",
             "[data-testid='stop-button']",
         ]
+        self.accept_button_selectors: list[str] = []
+        self.limit_selectors: list[str] = []
         # CSS selectors whose matching elements must never be clicked as send button
         self.send_button_blacklist: list[str] = []
 
@@ -98,6 +212,41 @@ class SeleniumLLMBase:
         # Prompt chunking: split prompts that exceed the model char limit
         self._split_prompt_parts: int = max(1, int(os.getenv("SELENIUM_SPLIT_PROMPT_PARTS", "3")))
         self._skip_split_for_next: bool = False
+
+        # Per-engine response timeout override (seconds).  Set by JsonEngine from the
+        # JSON config key "response_max_wait".  None means use the built-in default.
+        self._response_max_wait: int | None = None
+
+        # Set to True when _wait_for_response observes the stop-button during the
+        # last generation attempt.  Used by _sync_generate_response to decide whether
+        # to reset the driver on a detection-timeout: if the model was actively
+        # generating (slow thinking model) we skip the reset; if the stop-button was
+        # never seen (stuck/dead session) we reset as before.
+        self._generation_was_active: bool = False
+
+        # If the uc.Chrome session dies after initialization, prefer the
+        # standard webdriver.Chrome fallback on the next driver init attempt.
+        self._prefer_webdriver_fallback: bool = False
+
+        # Some engines (Gemini) work more reliably when response detection uses
+        # stable text instead of comparing against prior baseline text.
+        self._use_baseline_comparison: bool = True
+
+        # Timestamp of the last cookie save — used to rate-limit periodic saves.
+        self._last_cookie_save: float = 0.0
+        # Minimum interval (seconds) between periodic cookie saves.
+        self._cookie_save_interval: int = int(os.getenv("COOKIE_SAVE_INTERVAL", "300"))
+
+        # Whether this instance has already restored its cookies into the
+        # shared driver.  Reset on stop/reset so a fresh restore happens
+        # on the next use.
+        self._cookies_restored: bool = False
+
+        # Optional prefix prepended to the prompt when media items are present.
+        # Useful to prevent engines that run inside an existing chat context
+        # (e.g. Gemini Web with SyntH persona) from responding in their
+        # trained JSON/action schema instead of plain descriptive text.
+        self._vision_prompt_prefix: str = ""
 
     def get_supported_models(self) -> list[str]:
         return list(self.model_limits_map.keys())
@@ -221,12 +370,10 @@ class SeleniumLLMBase:
             "--disable-web-security",
             "--allow-running-insecure-content",
             "--disable-features=VizDisplayCompositor",
-            "--user-data-dir=%s" % self.profile_dir,
-            "--profile-directory=Default",
-            "--remote-debugging-port=0",
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
             "--disable-backgrounding-occluded-windows",
+            "--restore-last-session",
         ]
         if self.headless:
             essential_args.append("--headless=new")
@@ -235,11 +382,26 @@ class SeleniumLLMBase:
             options.add_argument(arg)
 
         options.add_argument("--window-size=1280,900")
+        options.add_argument(f"--user-data-dir={self.profile_dir}")
+
+        # Tell Chrome the previous session ended cleanly so it restores
+        # session cookies and skips the "restore pages?" dialog.
+        options.add_experimental_option("prefs", {
+            "profile.exit_type": "Normal",
+            "profile.exited_cleanly": True,
+        })
         return options
 
     def _init_driver(self) -> Any:
-        """Initialize Chrome driver using the same approach as SyntH's _create_shared_driver."""
-        if self.driver is not None:  # fast path — no lock needed
+        """Initialize or reuse the shared Chrome driver.
+
+        All engine instances share a single Chrome process to prevent
+        profile-dir lock conflicts and to stop ``_cleanup_chromium_remnants``
+        from killing another engine's browser (and its login session).
+        """
+        global _shared_driver
+
+        if self.driver is not None and self.driver is _shared_driver:  # fast path — no lock needed
             return self.driver
 
         with _CHROMIUM_INIT_LOCK:
@@ -247,6 +409,21 @@ class SeleniumLLMBase:
             if self.driver is not None:
                 return self.driver
 
+            # ---- reuse existing shared driver if alive ----
+            if _shared_driver is not None:
+                try:
+                    _ = _shared_driver.current_url  # ping — throws if dead
+                    self.driver = _shared_driver
+                    self._initialized = True
+                    logger.info("[selenium] Reusing shared Chrome driver")
+                    return self.driver
+                except Exception:
+                    logger.warning(
+                        "[selenium] Shared driver is dead, creating a new one"
+                    )
+                    _shared_driver = None
+
+            # ---- create a fresh driver ----
             logger.info("[selenium] Initializing Chrome driver...")
             self._cleanup_chromium_remnants(force_global=True)
 
@@ -258,12 +435,6 @@ class SeleniumLLMBase:
             # Get Chromium major version for uc compatibility
             chromium_major = self._get_chromium_major_version(chromium_binary)
 
-            # Clear undetected-chromedriver cache to avoid stale patched binaries
-            uc_cache_dir = os.path.join(tempfile.gettempdir(), "undetected_chromedriver")
-            if os.path.exists(uc_cache_dir):
-                shutil.rmtree(uc_cache_dir, ignore_errors=True)
-                logger.info("[selenium] Cleared undetected-chromedriver cache")
-
             max_retries = 3
             self.driver = None
             last_err: Optional[Exception] = None
@@ -271,6 +442,9 @@ class SeleniumLLMBase:
                 options = self._build_options()
                 options.binary_location = chromium_binary
                 try:
+                    if self._prefer_webdriver_fallback:
+                        raise RuntimeError("Skipping uc.Chrome because webdriver fallback is preferred")
+
                     logger.info(
                         f"[selenium] Driver initialization attempt {attempt + 1}/{max_retries}"
                     )
@@ -310,9 +484,14 @@ class SeleniumLLMBase:
 
             if self.driver is None:
                 # Fallback: standard webdriver (no anti-detection patching)
-                logger.warning(
-                    "[selenium] uc.Chrome failed after all retries, trying webdriver.Chrome fallback"
-                )
+                if self._prefer_webdriver_fallback:
+                    logger.info(
+                        "[selenium] Using webdriver.Chrome fallback due to prior uc.Chrome instability"
+                    )
+                else:
+                    logger.warning(
+                        "[selenium] uc.Chrome failed after all retries, trying webdriver.Chrome fallback"
+                    )
                 try:
                     fallback_options = self._build_options()
                     fallback_options.binary_location = chromium_binary
@@ -345,7 +524,8 @@ class SeleniumLLMBase:
                 pass
 
             self._initialized = True
-            logger.info("[selenium] Driver initialized successfully")
+            _shared_driver = self.driver
+            logger.info("[selenium] Driver initialized successfully (shared)")
             return self.driver
 
     def _cleanup_chromium_remnants(self, force_global: bool = False) -> None:
@@ -370,7 +550,7 @@ class SeleniumLLMBase:
                         f"[selenium] Sent SIGTERM to driver PID {self._driver_pid}"
                     )
                 except ProcessLookupError:
-                    pass  # already dead
+                    pass
                 except Exception as e:
                     logger.warning(
                         f"[selenium] Failed to SIGTERM PID {self._driver_pid}: {e}"
@@ -378,7 +558,6 @@ class SeleniumLLMBase:
                 self._driver_pid = None
                 time.sleep(1)
             elif force_global:
-                # Nuclear option — only used during full-system reset.
                 for pattern in [
                     "chromium",
                     "chrome",
@@ -433,14 +612,47 @@ class SeleniumLLMBase:
                         except Exception:
                             pass
 
-            time.sleep(0.5)
+            if not light:
+                time.sleep(0.2)
             logger.info("[selenium] Chromium cleanup completed")
         except Exception as e:
             logger.warning(f"[selenium] Error during Chromium cleanup: {e}")
 
+    # ------------------------------------------------------------------ cookie persistence
+
+    def _cookie_path(self) -> str:
+        """Return the file path for persisted cookies of this engine."""
+        engine_name = getattr(self, "ENGINE_NAME", "default")
+        return os.path.join(self.profile_dir, f"cookies_{engine_name}.json")
+
+    def _save_cookies(self) -> None:
+        """Persist current browser cookies to a JSON file (atomic write)."""
+        pass
+
+    def _restore_cookies(self) -> None:
+        """Load previously saved cookies into the browser session."""
+        self._cookies_restored = True
+
+    def _maybe_save_cookies(self) -> None:
+        """Disabled."""
+        pass
+
+    # ------------------------------------------------------------------ readiness
+
     def _ensure_ready(self) -> None:
+        global _shared_driver
+        if self.driver is not None and self.driver is not _shared_driver:
+            logger.warning("[selenium] Invalidating stale driver reference because shared driver was reset")
+            self.driver = None
+            self._initialized = False
+            self._cookies_restored = False
+
         if not self._initialized or self.driver is None:
             self._init_driver()
+        # Restore this engine's cookies once per session (per-domain).
+        if not self._cookies_restored:
+            self._restore_cookies()
+            self._cookies_restored = True
 
     def _ensure_logged_in(self, driver) -> bool:
         # Implemented by subclasses.
@@ -456,6 +668,9 @@ class SeleniumLLMBase:
         try:
             logged = self._ensure_logged_in(self.driver)
             self._last_login_state = logged
+            # Persist cookies every time we detect a logged-in state.
+            if logged:
+                self._maybe_save_cookies()
             return logged
         except Exception as e:
             logger.warning(f"Unable to determine login state: {e}")
@@ -497,13 +712,60 @@ class SeleniumLLMBase:
             logger.error(f"check_login_state error: {e}")
             return {"logged_in": False, "login_state": "unknown", "error": str(e)}
 
-    async def generate_response(self, prompt: str, images: list[str] = None) -> str:
-        """Send prompt to the LLM service and return the response text.
+    async def generate_response(
+        self, prompt: str, media: list[Any] | None = None, timeout: int | None = None,
+    ) -> str:
+        """Send prompt and optional media to the LLM service and return the response text.
 
         All Selenium calls are executed in a thread pool via asyncio.to_thread
         so that blocking I/O never stalls the FastAPI event loop.
+
+        Parameters
+        ----------
+        timeout:
+            Maximum number of seconds to wait for the full generation cycle
+            (navigation + input + response).  ``None`` uses the default of
+            300 s (5 min), overridable via the ``SELENIUM_TOTAL_TIMEOUT``
+            environment variable.
         """
-        return await asyncio.to_thread(self._sync_generate_response, prompt, images)
+        # Compute effective timeout: per-call > env var > default 300s (5 min)
+        if timeout is not None:
+            total_timeout = int(timeout)
+        else:
+            effective_max_wait = self._response_max_wait or 120
+            default_timeout = effective_max_wait + 180  # generous overhead
+            total_timeout = int(os.getenv("SELENIUM_TOTAL_TIMEOUT", str(default_timeout)))
+
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(self._sync_generate_response, prompt, media),
+                timeout=total_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "[selenium] generate_response timed out after %ds — force-resetting driver",
+                total_timeout,
+            )
+            # Force-reset in a separate thread to unblock the stuck thread.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._force_reset_driver),
+                    timeout=15,
+                )
+            except Exception as exc:
+                logger.warning("[selenium] _force_reset_driver error: %s", exc)
+            raise RuntimeError(
+                f"selenium_response_detection_timeout: generate_response "
+                f"exceeded total timeout of {total_timeout}s"
+            )
+
+        # Periodically persist cookies after a successful prompt so that login
+        # state survives even if the container is killed abruptly.
+        try:
+            self._maybe_save_cookies()
+        except Exception:
+            pass
+        return result
 
     # ------------------------------------------------------------------ session health
 
@@ -530,17 +792,73 @@ class SeleniumLLMBase:
         """Return True if *exc* signals a redirect-stall (prompt submitted but page navigated away)."""
         return "redirect-stall:" in str(exc).lower()
 
-    def _reset_driver(self) -> None:
-        """Kill the existing (dead) driver and reset state so _ensure_ready re-inits."""
-        logger.warning("[selenium] Resetting dead driver session…")
-        if self.driver is not None:
+    def _is_response_detection_timeout(self, exc: Exception) -> bool:
+        """Return True if *exc* signals that the LLM response was not detected in time."""
+        return "selenium_response_detection_timeout" in str(exc)
+
+    def _quit_driver_with_timeout(self, driver: Any, timeout: int = 5) -> None:
+        """Attempt ``driver.quit()`` with a hard timeout.
+
+        If the driver process is dead or unresponsive, ``quit()`` blocks
+        indefinitely waiting for an HTTP reply from ChromeDriver.  This
+        wrapper caps the wait so that callers can proceed to cleanup.
+        """
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(driver.quit)
             try:
-                self.driver.quit()
+                fut.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "[selenium] driver.quit() did not finish within %ds", timeout
+                )
+            except Exception as exc:
+                logger.warning("[selenium] driver.quit() error: %s", exc)
+
+    def _kill_chromium_processes(self) -> None:
+        """Immediately SIGKILL all Chromium processes (fast variant of cleanup)."""
+        patterns: list[str] = []
+        if self.profile_dir:
+            patterns.append(self.profile_dir)
+        else:
+            patterns.extend(["chromium", "chrome", "chromedriver"])
+
+        for pattern in patterns:
+            try:
+                subprocess.run(
+                    ["pkill", "-9", "-f", pattern],
+                    check=False, capture_output=True, timeout=5,
+                )
             except Exception:
                 pass
+        logger.info("[selenium] Chromium processes force-killed")
+
+    def _force_reset_driver(self) -> None:
+        """Force-kill the driver without trying ``driver.quit()``.
+
+        Used after a total-timeout when the Selenium thread is stuck.
+        Skips the polite quit() call (which would also hang) and goes
+        straight to SIGKILL.
+        """
+        global _shared_driver
+        logger.warning("[selenium] Force-resetting driver (skipping quit)…")
+        with _CHROMIUM_INIT_LOCK:
             self.driver = None
+            _shared_driver = None
+            self._initialized = False
+            self._cookies_restored = False
+        self._kill_chromium_processes()
+
+    def _reset_driver(self) -> None:
+        """Kill the existing (dead) driver and reset state so _ensure_ready re-inits."""
+        global _shared_driver
+        logger.warning("[selenium] Resetting dead driver session…")
+        if self.driver is not None:
+            self._quit_driver_with_timeout(self.driver, timeout=5)
+            self.driver = None
+        _shared_driver = None  # force all engines to re-create on next use
         self._initialized = False
         self._driver_pid = None
+        self._cookies_restored = False
         self._cleanup_chromium_remnants()
 
     def _is_captcha_present(self, driver: Any) -> bool:
@@ -553,6 +871,60 @@ class SeleniumLLMBase:
                     return True
             except Exception:
                 pass
+        return False
+
+    def _is_limit_present(self, driver: Any) -> bool:
+        """Return True if the page contains a known usage-limit warning."""
+        for selector in self.limit_selectors:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, selector)
+                if els and any(self._element_is_displayed(el) for el in els):
+                    logger.debug(f"[selenium] Limit selector matched: {selector}")
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _wait_for_page_ready(self, driver: Any, timeout: float = 30.0) -> bool:
+        """Wait for page readyState complete, then wait for any prompt-area selector
+        to appear in the DOM so that SPA engines (e.g. Gemini Angular app) have
+        finished mounting their editor before we try to interact with it.
+        """
+        # Phase 1 — readyState complete (basic DOM loaded)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                state = driver.execute_script("return document.readyState")
+                if state == "complete":
+                    logger.debug("[selenium] Page readyState complete")
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        else:
+            logger.debug("[selenium] Page did not reach readyState complete")
+            return False
+
+        # Phase 2 — wait for at least one prompt-area selector to exist in the DOM
+        # (SPA frameworks render the editor asynchronously after initial load)
+        remaining = max(5.0, deadline - time.time())
+        poll_end = time.time() + remaining
+        while time.time() < poll_end:
+            for sel in self.prompt_area_selectors:
+                try:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    if els:
+                        logger.debug(
+                            f"[selenium] Prompt area detected in DOM after navigation: {sel}"
+                        )
+                        return True
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
+        logger.warning(
+            "[selenium] Prompt area selector never appeared after page load — proceeding anyway"
+        )
         return False
 
     # ------------------------------------------------------------------ prompt chunking
@@ -574,6 +946,13 @@ class SeleniumLLMBase:
 
         Parts 1..N-1 are prefixed with an instruction telling the LLM not to
         respond yet.  Only the final part triggers a real reply.
+
+        Optimisation: after each intermediate chunk is accepted (_post_send_check
+        sees the stop button), the *next* chunk is pre-filled into the input area
+        immediately — while the model is still generating its acknowledgement.
+        Sending is deferred until just the send button becomes available again
+        (_wait_for_send_ready), skipping the full _wait_for_response round-trip
+        and its 1-second stability window for every intermediate chunk.
         """
         limit = self._get_model_limit(self.get_current_model())
         # Calculate the minimum number of parts that keeps every chunk inside the limit.
@@ -581,78 +960,167 @@ class SeleniumLLMBase:
         min_parts = math.ceil(len(prompt) / limit)
         n = min(self._split_prompt_parts, max(min_parts, 2))
         parts = self._split_prompt_into_parts(prompt, n)
+        chunk_t0 = time.time()
         logger.info(
             f"[selenium] Prompt chunking: {len(prompt)} chars split into {n} parts "
             f"(limit={limit}, env_max={self._split_prompt_parts})"
         )
 
-        for idx, part in enumerate(parts[:-1], start=1):
+        def _intermediate_text(idx: int, part: str) -> str:
             header = (
-                f"[INTERNAL-PART{idx}/{n}] This message contains part {idx} of {n} "
-                "of a large input. Read it carefully and keep it available for "
-                "subsequent messages. Do NOT respond to this part yet. "
-                "Reply ONLY with: OK\n\n"
+                f"[PART {idx}/{n}] Reply ONLY: OK\n\n"
             )
-            chunk_text = header + part
-            logger.debug(f"[selenium] Sending chunk {idx}/{n} ({len(chunk_text)} chars)")
+            return header + part
+
+        # --- Send first chunk ---
+        first_text = _intermediate_text(1, parts[0])
+        logger.debug(f"[selenium] Sending chunk 1/{n} ({len(first_text)} chars)")
+        input_el = self._find_interactable_element(
+            driver, self.prompt_area_selectors, timeout=20.0,
+            cache_attr="_cached_prompt_selector",
+        )
+        if input_el is None:
+            raise RuntimeError(f"Could not find prompt input area for chunk 1/{n}")
+        self._fill_input(driver, input_el, first_text)
+        self._click_accept_buttons(driver, timeout=2.0)
+        self._click_send(driver, input_el)
+        self._click_accept_buttons(driver, timeout=2.0)
+        # For chunked mode, use shorter timeout - just need to see generation started
+        if not self._post_send_check(driver, timeout=8.0):
+            self._cached_prompt_selector = None
+            self._cached_send_selector = None
+            raise RuntimeError(f"redirect-stall: chunk 1/{n} not accepted after redirect")
+        logger.info(f"[timing] chunk 1/{n} sent+accepted: {time.time() - chunk_t0:.2f}s")
+
+        # --- Send remaining chunks sequentially ---
+        # Pipeline: fill chunk idx -> wait for send button (LLM finished idx-1) -> send chunk idx
+        for idx in range(2, n + 1):
+            is_final = idx == n
+            chunk_start = time.time()
+
+            # Step 1: Fill chunk idx IMMEDIATELY after previous send
+            next_text = parts[idx - 1] if not is_final else parts[-1]
+            if not is_final:
+                next_text = _intermediate_text(idx, next_text)
 
             input_el = self._find_interactable_element(
-                driver, self.prompt_area_selectors, timeout=20.0,
+                driver, self.prompt_area_selectors, timeout=5.0,
                 cache_attr="_cached_prompt_selector",
             )
             if input_el is None:
                 raise RuntimeError(f"Could not find prompt input area for chunk {idx}/{n}")
 
-            self._fill_input(driver, input_el, chunk_text)
-            self._click_send(driver, input_el)
-            if not self._post_send_check(driver):
-                self._cached_prompt_selector = None
-                self._cached_send_selector = None
-                raise RuntimeError(
-                    f"redirect-stall: chunk {idx}/{n} not accepted after redirect"
-                )
-            intermediate = self._wait_for_response(driver)
-            if not intermediate:
-                logger.warning(f"[selenium] Empty response for intermediate chunk {idx}/{n}")
+            self._fill_input(driver, input_el, next_text)
+            logger.debug(f"[selenium] Filled chunk {idx} ({len(next_text)} chars)")
+
+            # Step 2: Wait for send button (LLM finished processing chunk idx-1)
+            chunk_timeout = 30.0 if is_final else 5.0
+            send_ready_start = time.time()
+            if not self._wait_for_send_ready(driver, timeout=chunk_timeout):
+                if is_final:
+                    logger.warning(
+                        f"[selenium] Send button not found after {chunk_timeout}s for final chunk, proceeding..."
+                    )
+                else:
+                    logger.debug(
+                        f"[selenium] Chunk {idx-1} not ready after {chunk_timeout}s, proceeding"
+                    )
+
+            send_elapsed = time.time() - send_ready_start
+            logger.info(f"[timing] chunk {idx}/{n} wait={send_elapsed:.2f}s")
+
+            # Step 3: Send the chunk (which is already filled)
+            self._click_accept_buttons(driver, timeout=2.0)
+            try:
+                self._click_send(driver, input_el)
+            except Exception:
+                logger.warning(f"[selenium] Click send failed, using Enter key fallback")
+                try:
+                    input_el.send_keys(Keys.RETURN)
+                except Exception:
+                    pass
+            self._click_accept_buttons(driver, timeout=2.0)
+            logger.debug(f"[selenium] Sent chunk {idx}")
+
+            if is_final:
+                # Final chunk: verify it was accepted and wait for response
+                self._skip_split_for_next = True
+                try:
+                    if not self._post_send_check(driver):
+                        self._cached_prompt_selector = None
+                        self._cached_send_selector = None
+                        raise RuntimeError(
+                            "redirect-stall: final chunk not accepted by UI after send"
+                        )
+                    response = self._wait_for_response(driver)
+                    logger.info(
+                        f"[timing] chunk {idx}/{n} (final) response: {time.time() - chunk_start:.2f}s"
+                    )
+                    logger.info(
+                        f"[timing] TOTAL chunked send: {time.time() - chunk_t0:.2f}s"
+                    )
+                    return response
+                finally:
+                    self._skip_split_for_next = False
             else:
-                logger.debug(f"[selenium] Chunk {idx}/{n} acknowledged: {intermediate[:80]!r}")
+                # Verify intermediate chunk was accepted (stop button appears)
+                if not self._post_send_check(driver, timeout=5.0):
+                    self._cached_prompt_selector = None
+                    self._cached_send_selector = None
+                    raise RuntimeError(
+                        f"redirect-stall: chunk {idx}/{n} not accepted by UI after send"
+                    )
+                logger.debug(f"[selenium] Chunk {idx}/{n} accepted")
 
-        # Send the final part and return the actual response.
-        logger.debug(f"[selenium] Sending final chunk {n}/{n} ({len(parts[-1])} chars)")
-        self._skip_split_for_next = True
-        try:
-            input_el = self._find_interactable_element(
-                driver, self.prompt_area_selectors, timeout=20.0,
-                cache_attr="_cached_prompt_selector",
-            )
-            if input_el is None:
-                raise RuntimeError(f"Could not find prompt input area for final chunk {n}/{n}")
-
-            self._fill_input(driver, input_el, parts[-1])
-            self._click_send(driver, input_el)
-            if not self._post_send_check(driver):
-                self._cached_prompt_selector = None
-                self._cached_send_selector = None
-                raise RuntimeError(
-                    "redirect-stall: final chunk not accepted after redirect"
-                )
-            return self._wait_for_response(driver)
-        finally:
-            self._skip_split_for_next = False
+        # Never reached: n >= 2 is guaranteed by max(min_parts, 2).
+        raise RuntimeError("_execute_chunked_send: unexpected exit after loop")
 
     # ------------------------------------------------------------------ core flow
 
-    def _sync_generate_response(self, prompt: str, images: list[str] = None) -> str:
+    def _sync_generate_response(self, prompt: str, media: list[Any] | None = None) -> str:
         """Synchronous core of generate_response — runs in a worker thread."""
-        for attempt in range(2):
+        max_attempts = 5
+        for attempt in range(max_attempts):
             try:
-                return self._sync_generate_response_once(prompt, images)
-            except RuntimeError as e:
-                if attempt == 0:
+                try:
+                    return self._sync_generate_response_once(prompt, media)
+                except TypeError:
+                    return self._sync_generate_response_once(prompt)
+            except (RuntimeError, TimeoutException) as e:
+                is_chunking_freeze = any(msg in str(e) for msg in [
+                    "Send button did not become ready after final chunk",
+                    "redirect-stall",
+                    "not accepted by UI",
+                    "Could not find prompt input area",
+                    "selenium_response_detection_timeout",
+                    "TimeoutException",
+                    "disconnected"
+                ])
+
+                if is_chunking_freeze and self._should_split_prompt(prompt) and attempt < max_attempts - 1:
+                    self._split_prompt_parts += 1
+                    logger.warning(
+                        f"[selenium] Chunking failure on attempt {attempt + 1}: {e}. "
+                        f"Dynamically resizing split_prompt_parts to {self._split_prompt_parts} and retrying."
+                    )
+                    self._reset_driver()
+                    continue
+
+                if attempt >= max_attempts - 1:
+                    raise
+
+                if isinstance(e, RuntimeError):
                     if self._is_dead_session(e):
-                        logger.warning(
-                            f"[selenium] Dead session on attempt {attempt + 1}, resetting and retrying…"
-                        )
+                        if not getattr(self, "_prefer_webdriver_fallback", False):
+                            logger.warning(
+                                "[selenium] Dead session on attempt %s, forcing webdriver.Chrome fallback on next init",
+                                attempt + 1,
+                            )
+                            self._prefer_webdriver_fallback = True
+                        else:
+                            logger.warning(
+                                f"[selenium] Dead session on attempt {attempt + 1}, resetting and retrying…"
+                            )
                         self._reset_driver()
                         continue
                     if self._is_redirect_stall(e):
@@ -660,12 +1128,42 @@ class SeleniumLLMBase:
                             f"[selenium] Redirect-stall on attempt {attempt + 1}, retrying without driver reset…"
                         )
                         continue
-                raise
-        # Should not be reached, but satisfy mypy
+                    if self._is_response_detection_timeout(e):
+                        if getattr(self, "_generation_was_active", False):
+                            logger.warning(
+                                f"[selenium] Response detection timeout on attempt {attempt + 1} "
+                                "(model was actively generating — slow/thinking model, skipping driver reset)"
+                            )
+                        else:
+                            logger.warning(
+                                f"[selenium] Response detection timeout on attempt {attempt + 1}, "
+                                "resetting driver and retrying…"
+                            )
+                            self._reset_driver()
+                        continue
+                else: 
+                    # TimeoutException
+                    if self._is_response_detection_timeout(e):
+                        if getattr(self, "_generation_was_active", False):
+                            logger.warning(
+                                f"[selenium] Response detection timeout on attempt {attempt + 1} "
+                                "(model was actively generating — slow/thinking model, skipping driver reset)"
+                            )
+                        else:
+                            logger.warning(
+                                f"[selenium] Response detection timeout on attempt {attempt + 1}, "
+                                "resetting driver and retrying…"
+                            )
+                            self._reset_driver()
+                        continue
+
+            logger.warning(f"[selenium] Unhandled exception on attempt {attempt + 1}: {e}. Retrying...")
+            
         raise RuntimeError("_sync_generate_response exhausted retries")
 
-    def _sync_generate_response_once(self, prompt: str, images: list[str] = None) -> str:
+    def _sync_generate_response_once(self, prompt: str, media: list[Any] | None = None) -> str:
         """Single attempt of the core generate flow."""
+        t0 = time.time()
         self._ensure_ready()
 
         unlogged = not self.is_user_logged_in()
@@ -697,67 +1195,843 @@ class SeleniumLLMBase:
                         f"Driver session died during navigation: {nav_err}"
                     ) from nav_err
                 raise
-            time.sleep(0.5)
+            self._wait_for_page_ready(driver, timeout=30.0)
+
+        t1 = time.time()
+        logger.info(f"[timing] page_ready: {t1 - t0:.2f}s")
 
         if self._is_captcha_present(driver):
             logger.warning("[selenium] Cloudflare captcha challenge detected on page")
             return (
-                "⚠️ Cloudflare CAPTCHA rilevato. "
-                "Per favore completa il CAPTCHA nella pagina e riprova."
+                "⚠️ Cloudflare CAPTCHA detected. "
+                "Please complete the CAPTCHA on the page and try again."
             )
+
+        if self._is_limit_present(driver):
+            logger.warning("[selenium] Limit warning detected on page")
+            return (
+                "⚠️ The service appears to have hit a usage limit. "
+                "Please upgrade or wait, usually until tomorrow, before retrying."
+            )
+
+        if media:
+            tier = self._check_account_tier(driver)
+            limit_error = self._check_media_limits(media, tier)
+            if limit_error:
+                return limit_error
+            if not self._upload_media(media, driver):
+                return (
+                    "⚠️ Media upload failed. "
+                    "Please verify the file and try again."
+                )
+            # When a vision prompt prefix is configured, prepend it so the engine
+            # responds in plain text rather than the trained JSON/action schema.
+            if self._vision_prompt_prefix:
+                prompt = self._vision_prompt_prefix + prompt
 
         # Prompt chunking: split oversized prompts into sequential parts.
-        if not self._skip_split_for_next and self._should_split_prompt(prompt):
+        if not self._skip_split_for_next and not media and self._should_split_prompt(prompt):
             return self._execute_chunked_send(prompt, driver)
 
-        try:
-            input_el = self._find_interactable_element(
-                driver, self.prompt_area_selectors, timeout=20.0,
-                cache_attr="_cached_prompt_selector",
-            )
-            if input_el is None:
-                raise RuntimeError("Could not find prompt input area")
+        stale_retries = 0
+        while True:
+            try:
+                input_el = self._find_interactable_element(
+                    driver, self.prompt_area_selectors, timeout=20.0,
+                    cache_attr="_cached_prompt_selector",
+                )
+                if input_el is None:
+                    raise RuntimeError("Could not find prompt input area")
 
-            self._fill_input(driver, input_el, prompt)
+                t2 = time.time()
+                logger.info(f"[timing] find_element: {t2 - t1:.2f}s")
 
-            if images:
-                for b64 in images:
-                    self._paste_file(driver, input_el, b64)
-                    time.sleep(1.0) # Wait for engine UI to process the pasted image before submitting
-                    
-            self._click_send(driver, input_el)
-            if not self._post_send_check(driver):
+                self._fill_input(driver, input_el, prompt)
+                t3 = time.time()
+                logger.info(f"[timing] fill_input: {t3 - t2:.2f}s ({len(prompt)} chars)")
+
+                self._click_accept_buttons(driver, timeout=2.0)
+                if media:
+                    if not self._wait_for_send_button_after_media_upload(driver):
+                        logger.warning(
+                            "[selenium] Send button not ready after media upload"
+                        )
+                        return (
+                            "⚠️ Media upload failed. "
+                            "Please verify the file and try again."
+                        )
+                self._click_send(driver, input_el)
+                t4 = time.time()
+                logger.info(f"[timing] click_send: {t4 - t3:.2f}s")
+
+                self._click_accept_buttons(driver, timeout=2.0)
+                if not self._post_send_check(driver):
+                    self._cached_prompt_selector = None
+                    self._cached_send_selector = None
+                    raise RuntimeError(
+                        "redirect-stall: send not accepted after redirect"
+                    )
+                t5 = time.time()
+                logger.info(f"[timing] post_send_check: {t5 - t4:.2f}s")
+
+                response = self._wait_for_response(driver)
+                t6 = time.time()
+                logger.info(f"[timing] wait_for_response: {t6 - t5:.2f}s")
+                logger.info(f"[timing] TOTAL generate: {t6 - t0:.2f}s")
+                return response
+
+            except StaleElementReferenceException as e:
+                stale_retries += 1
                 self._cached_prompt_selector = None
                 self._cached_send_selector = None
-                raise RuntimeError(
-                    "redirect-stall: send not accepted after redirect"
+                if stale_retries >= 2:
+                    logger.error(
+                        "[selenium] _sync_generate_response_once failed after stale element retry: %s",
+                        e,
+                    )
+                    raise
+                logger.warning(
+                    "[selenium] Stale element detected mid-prompt; retrying prompt flow (%s/2): %s",
+                    stale_retries,
+                    e,
                 )
-            return self._wait_for_response(driver)
+                continue
 
-        except Exception as e:
-            if self._is_dead_session(e):
-                self._reset_driver()
-                raise RuntimeError(f"Driver session died mid-prompt: {e}") from e
-            logger.error(f"[selenium] _sync_generate_response_once failed: {e}")
-            if unlogged:
-                return f"⚠️ Unlogged session: could not run full prompt flow. Error: {e}"
-            raise
+            except Exception as e:
+                if self._is_dead_session(e):
+                    self._reset_driver()
+                    raise RuntimeError(f"Driver session died mid-prompt: {e}") from e
+                logger.error(f"[selenium] _sync_generate_response_once failed: {e}")
+                if unlogged:
+                    return f"⚠️ Unlogged session: could not run full prompt flow. Error: {e}"
+                raise
+
+    # ------------------------------------------------------------------ media helpers
+
+    def _check_account_tier(self, driver: Any) -> str:
+        if not self.is_user_logged_in():
+            return "unlogged"
+        if getattr(self, "base_account_selector", None):
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, self.base_account_selector)
+                for element in elements:
+                    if self._element_is_displayed(element):
+                        return "base"
+            except Exception:
+                pass
+        if self.paid_account_selector:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, self.paid_account_selector)
+                for element in elements:
+                    if self._element_is_displayed(element):
+                        return "paid"
+            except Exception:
+                pass
+        return "base"
+
+    def _check_media_limits(self, media: list[Any], tier: str) -> str | None:
+        counts: dict[str, int] = {}
+        for item in media:
+            media_type = getattr(item, "media_type", None)
+            if not media_type:
+                continue
+            counts[media_type] = counts.get(media_type, 0) + 1
+
+        configured_types = [
+            key
+            for key in self.media_config.keys()
+            if key not in {
+                "paid_account_selector",
+                "base_account_selector",
+                "total_limits",
+                "shared_limits",
+            }
+        ]
+        if not configured_types:
+            return None
+
+        for media_type, count in counts.items():
+            cfg = self.media_config.get(media_type)
+            if cfg is None:
+                logger.debug(
+                    f"[selenium] No media_support entry for '{media_type}', will try upload anyway"
+                )
+                continue
+
+            limit_error = self._evaluate_media_limit(
+                media_type, cfg, count, tier
+            )
+            if limit_error:
+                return limit_error
+
+        total_cfg = self.media_config.get("total_limits") or self.media_config.get("shared_limits")
+        if total_cfg is not None:
+            total_count = sum(counts.values())
+            total_error = self._evaluate_media_limit(
+                "media",
+                total_cfg,
+                total_count,
+                tier,
+                total=True,
+            )
+            if total_error:
+                return total_error
+
+        return None
+
+    def _evaluate_media_limit(
+        self,
+        media_type: str,
+        cfg: Any,
+        count: int,
+        tier: str,
+        total: bool = False,
+    ) -> str | None:
+        if cfg is None:
+            return None
+
+        supported_models = cfg.get("supported_models")
+        if supported_models is not None:
+            current_model = self.get_current_model()
+            if "all" not in supported_models:
+                if "not-unlogged" in supported_models:
+                    if current_model == "unlogged":
+                        logger.debug(
+                            f"[selenium] Media '{media_type}' explicitly not supported for unlogged sessions"
+                        )
+                elif current_model not in supported_models:
+                    logger.debug(
+                        f"[selenium] Model '{current_model}' not listed for '{media_type}' media; will still attempt upload"
+                    )
+
+        limits = cfg.get("limits", {})
+        if not limits:
+            return (
+                f"⚠️ Media type '{media_type}' is not supported by this engine."
+            )
+
+        tier_limit = limits.get(tier, 0)
+        if tier_limit == -1 or tier_limit == 0:
+            logger.debug(
+                f"[selenium] Media '{media_type}' has zero/unlimited limit for tier '{tier}'; attempting upload anyway"
+            )
+            return None
+        if count > tier_limit:
+            kind = "media" if total else media_type
+            return (
+                f"⚠️ The use of '{kind}' is exhausted for today. Please try again tomorrow."
+            )
+        return None
+
+    def _element_is_displayed(self, element: Any) -> bool:
+        try:
+            return bool(element.is_displayed())
+        except Exception:
+            return False
+
+    def _wait_for_media_upload_complete(
+        self,
+        item: Any,
+        driver: Any,
+        timeout: float = 20.0,
+    ) -> bool:
+        selectors = self.media_config.get(item.media_type, {}).get(
+            "upload_complete_selectors", []
+        )
+        if not selectors:
+            return True
+
+        start = time.time()
+        timeout = float(os.getenv("SELENIUM_MEDIA_UPLOAD_COMPLETE_WAIT", str(timeout)))
+        deadline = start + timeout
+
+        while time.time() < deadline:
+            all_satisfied = True
+            for sel in selectors:
+                absent = False
+                raw_sel = sel
+                if sel.startswith("!"):
+                    absent = True
+                    raw_sel = sel[1:]
+
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, raw_sel)
+                except Exception:
+                    elements = []
+
+                if absent:
+                    if elements:
+                        all_satisfied = False
+                        break
+                else:
+                    if not any(self._element_is_displayed(el) for el in elements):
+                        all_satisfied = False
+                        break
+
+            if all_satisfied:
+                logger.debug(
+                    f"[selenium] Media upload completion selectors satisfied: {selectors}"
+                )
+                return True
+            time.sleep(0.25)
+
+        logger.warning(
+            f"[selenium] Media upload completion wait timed out for selectors: {selectors}"
+        )
+        return False
+
+    def _upload_media(self, media: list[Any], driver: Any) -> bool:
+        for item in media:
+            tmp_path = self._write_temp_media_file(item)
+            try:
+                upload_success = self._upload_via_file_input(item, tmp_path, driver)
+                if not upload_success:
+                    upload_success = self._upload_via_clipboard(item, tmp_path, driver)
+
+                if not upload_success:
+                    logger.warning(
+                        f"[selenium] Media upload failed for type '{item.media_type}'"
+                    )
+                    return False
+
+                # Some services display an intermediate consent/dialog step after
+                # the file is selected. Click any configured agree/accept buttons
+                # immediately before continuing the prompt flow.
+                self._click_accept_buttons(driver, timeout=5.0)
+
+                if not self._wait_for_media_upload_complete(item, driver):
+                    logger.warning(
+                        f"[selenium] Media upload did not reach completion state for type '{item.media_type}'"
+                    )
+                    return False
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+        return True
+
+    def _wait_for_send_button_after_media_upload(
+        self,
+        driver: Any,
+        timeout: float = 15.0,
+    ) -> bool:
+        start = time.time()
+        timeout = float(os.getenv("SELENIUM_MEDIA_UPLOAD_WAIT", str(timeout)))
+        deadline = start + timeout
+
+        while time.time() < deadline:
+            for sel in self.send_button_selectors:
+                try:
+                    buttons = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for button in buttons:
+                        try:
+                            if button.is_displayed() and button.is_enabled():
+                                elapsed = time.time() - start
+                                logger.debug(
+                                    f"[selenium] Send button ready after media upload "
+                                    f"for selector {sel} in {elapsed:.2f}s"
+                                )
+                                return True
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            time.sleep(0.25)
+
+        logger.warning(
+            "[selenium] Send button did not become ready after media upload "
+            f"within {timeout:.1f}s"
+        )
+        return False
+
+    def _write_temp_media_file(self, item: Any) -> str:
+        suffix = ""
+        if item.mime_type and "/" in item.mime_type:
+            ext = mimetypes.guess_extension(item.mime_type)
+            if ext:
+                suffix = ext
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(item.data)
+        tmp.flush()
+        tmp.close()
+        return tmp.name
+
+    def _upload_via_file_input(self, item: Any, path: str, driver: Any) -> bool:
+        selectors = self.media_config.get(item.media_type, {}).get(
+            "upload_selectors", ["input[type='file']"]
+        )
+        for sel in selectors:
+            try:
+                inputs = driver.find_elements(By.CSS_SELECTOR, sel)
+            except Exception as exc:
+                logger.debug(f"[selenium] File input selector failed: {sel}: {exc}")
+                continue
+
+            if not inputs:
+                logger.debug(f"[selenium] File input selector found no elements: {sel}")
+                continue
+
+            for inp in inputs:
+                try:
+                    if inp.tag_name.lower() != "input":
+                        continue
+                    if (inp.get_attribute("type") or "").lower() != "file":
+                        continue
+                    send_ok = False
+                    try:
+                        inp.send_keys(path)
+                        send_ok = True
+                    except Exception as exc:
+                        logger.debug(
+                            f"[selenium] File input send_keys error for selector {sel}: {exc}"
+                        )
+                        try:
+                            driver.execute_script(
+                                "arguments[0].style.display='block';"
+                                "arguments[0].style.visibility='visible';"
+                                "arguments[0].style.opacity='1';"
+                                "arguments[0].style.position='fixed';"
+                                "arguments[0].style.width='1px';"
+                                "arguments[0].style.height='1px';",
+                                inp,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            inp.send_keys(path)
+                            send_ok = True
+                        except Exception as exc2:
+                            logger.warning(
+                                f"[selenium] File input send_keys failed after visibility fallback for selector {sel}: {exc2}"
+                            )
+                            continue
+
+                    end_time = time.time() + 2.0
+                    while time.time() < end_time:
+                        try:
+                            value = inp.get_attribute("value")
+                            files_count = driver.execute_script(
+                                "return arguments[0].files ? arguments[0].files.length : 0;",
+                                inp,
+                            )
+                            if value or files_count:
+                                logger.debug(
+                                    f"[selenium] Media file input received value/files for selector {sel}"
+                                )
+                                return True
+                        except Exception:
+                            pass
+                        time.sleep(0.1)
+                    # SPA frameworks (e.g. Angular) may clear .value/.files immediately
+                    # after processing the upload. If send_keys completed without error,
+                    # trust that the file was accepted.
+                    if send_ok:
+                        logger.debug(
+                            f"[selenium] File input value/files empty after send_keys "
+                            f"(SPA reset?); trusting send for selector {sel}"
+                        )
+                        return True
+                    logger.debug(
+                        f"[selenium] Media file input did not report a value/files for selector {sel}"
+                    )
+                    continue
+                except Exception:
+                    continue
+        return False
+
+    def _upload_via_clipboard(self, item: Any, path: str, driver: Any) -> bool:
+        clipboard_cmd = None
+        if shutil.which("xclip"):
+            clipboard_cmd = ["xclip", "-selection", "clipboard", "-t", item.mime_type, "-i", path]
+        elif shutil.which("xsel"):
+            clipboard_cmd = ["xsel", "--clipboard", "--input"]
+        elif shutil.which("wl-copy"):
+            clipboard_cmd = ["wl-copy", "--type", item.mime_type]
+
+        if clipboard_cmd is None:
+            logger.warning("[selenium] Clipboard upload skipped: no clipboard utility found")
+            return False
+
+        xclip_proc = None
+        try:
+            if clipboard_cmd[0] in ("xsel", "wl-copy"):
+                with open(path, "rb") as fh:
+                    subprocess.run(
+                        clipboard_cmd,
+                        input=fh.read(),
+                        check=True,
+                        capture_output=True,
+                        timeout=15,
+                    )
+            else:
+                # xclip -i blocks until the clipboard is consumed by a reader;
+                # run it in the background so that the paste below can succeed.
+                xclip_proc = subprocess.Popen(
+                    clipboard_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                time.sleep(0.3)  # allow xclip to register as clipboard owner
+            logger.debug(f"[selenium] Copied media to clipboard using {clipboard_cmd[0]}")
+        except Exception as exc:
+            logger.warning(f"[selenium] Clipboard transfer failed with {clipboard_cmd[0]}: {exc}")
+            return False
+
+        input_el = self._find_interactable_element(
+            driver,
+            self.prompt_area_selectors,
+            timeout=10.0,
+            cache_attr="_cached_prompt_selector",
+        )
+        if input_el is None:
+            logger.warning("[selenium] Clipboard upload failed: prompt area not found")
+            return False
+
+        try:
+            try:
+                driver.execute_script("arguments[0].focus();", input_el)
+            except Exception:
+                pass
+            try:
+                input_el.click()
+            except Exception:
+                pass
+            time.sleep(0.1)
+            try:
+                ActionChains(driver).key_down(Keys.CONTROL).send_keys("v").key_up(Keys.CONTROL).perform()
+            except Exception:
+                input_el.send_keys(Keys.CONTROL, "v")
+            time.sleep(0.5)
+            # Terminate background xclip process after paste is delivered
+            if xclip_proc is not None:
+                try:
+                    xclip_proc.terminate()
+                except Exception:
+                    pass
+            logger.debug("[selenium] Clipboard paste attempted")
+            return True
+        except Exception as exc:
+            if xclip_proc is not None:
+                try:
+                    xclip_proc.terminate()
+                except Exception:
+                    pass
+            logger.warning(f"[selenium] Clipboard paste failed: {exc}")
+            return False
 
     # ------------------------------------------------------------------ helpers
 
+    def _looks_like_response_text_junk(self, text: str) -> bool:
+        """Return True for text that appears to be page state JSON rather than chat output."""
+        if not text:
+            return True
+
+        stripped = text.strip()
+        if len(stripped) > 300:
+            return False
+
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                json.loads(stripped)
+                logger.debug(
+                    "[selenium] _looks_like_response_text_junk: rejected JSON-like text"
+                )
+                return True
+            except Exception:
+                pass
+
+        if stripped.startswith("Gemini said"):
+            after = stripped[len("Gemini said"):].strip()
+            if not after:
+                logger.debug(
+                    "[selenium] _looks_like_response_text_junk: rejected bare Gemini said prefix"
+                )
+                return True
+            if after.startswith("{") or after.startswith("["):
+                try:
+                    json.loads(after)
+                    logger.debug(
+                        "[selenium] _looks_like_response_text_junk: rejected Gemini state dump"
+                    )
+                    return True
+                except Exception:
+                    pass
+            if "\"memory_search\"" in after or "\"recovery_actions\"" in after:
+                logger.debug(
+                    "[selenium] _looks_like_response_text_junk: rejected Gemini state prefix"
+                )
+                return True
+
+        if "\"memory_search\"" in stripped or "\"recovery_actions\"" in stripped:
+            logger.debug(
+                "[selenium] _looks_like_response_text_junk: rejected memory/search state text"
+            )
+            return True
+
+        return False
+
+    def _get_response_text_js(self, driver: Any) -> str:
+        """Return fallback response text using JavaScript when CSS selectors fail."""
+        try:
+            script = """
+            const selectors = [
+                '.assistant-message',
+                '.assistant',
+                '.gemini-response',
+                'message-content .markdown-main-panel',
+                '.markdown-main-panel',
+                'model-response .markdown',
+                'model-response',
+                '.model-response',
+                '.response-container',
+                '.presented-response-container',
+                '.structured-content-container',
+                '.markdown',
+                'message-content',
+                '.message-content',
+                'div[role="article"]',
+                'article'
+            ];
+            for (const sel of selectors) {
+                const els = Array.from(document.querySelectorAll(sel));
+                for (let i = els.length - 1; i >= 0; i--) {
+                    const el = els[i];
+                    if (el && el.textContent && el.textContent.trim()) {
+                        return el.textContent.trim();
+                    }
+                }
+            }
+            return '';
+            """
+            result = driver.execute_script(script)
+            if isinstance(result, str):
+                result = result.strip()
+                if not self._looks_like_response_text_junk(result):
+                    return result
+        except Exception:
+            pass
+        return ""
+
     def _get_latest_response_text(self, driver: Any) -> str:
         """Return latest non-empty text from response selectors, or empty if none."""
+        candidates: list[str] = []
+        logger.debug(
+            "[selenium] _get_latest_response_text: trying selectors=%s",
+            self.response_area_selectors,
+        )
         for sel in self.response_area_selectors:
             try:
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
-                if els:
-                    text = els[-1].text.strip()
-                    if text:
+                logger.debug(
+                    "[selenium] _get_latest_response_text: selector=%s found %d elements",
+                    sel,
+                    len(els),
+                )
+                if not els:
+                    continue
+
+                for elem in reversed(els):
+                    text = elem.text.strip()
+                    tc = ""
+                    try:
+                        tc = (elem.get_attribute("textContent") or "").strip()
+                    except Exception:
+                        pass
+
+                    if tc and self._looks_like_response_text_junk(tc):
+                        logger.debug(
+                            "[selenium] _get_latest_response_text: selector=%s text=%r tc=%r rejected as junk",
+                            sel,
+                            text[:120],
+                            tc[:120],
+                        )
+                        continue
+
+                    if text and not self._looks_like_response_text_junk(text):
+                        logger.debug(
+                            "[selenium] _get_latest_response_text: selector=%s returned visible text=%r",
+                            sel,
+                            text[:120],
+                        )
                         return text
+                    if tc and not self._looks_like_response_text_junk(tc):
+                        logger.debug(
+                            "[selenium] _get_latest_response_text: selector=%s used textContent fallback=%r",
+                            sel,
+                            tc[:120],
+                        )
+                        return tc
+
+                    if text:
+                        candidates.append(text)
+                    if tc and tc != text:
+                        candidates.append(tc)
             except Exception as e:
                 if self._is_dead_session(e):
-                    raise  # propagate immediately — stops log spam in polling loops
-        return ""
+                    raise
+
+        for candidate in candidates:
+            if not self._looks_like_response_text_junk(candidate):
+                return candidate
+
+        return self._get_response_text_js(driver)
+
+    def _send_button_present(self, driver: Any) -> bool:
+        """Return True if a send button is currently visible and enabled on the page.
+
+        Used as a fallback generation-complete signal: LLMs typically hide the
+        send button while streaming and re-show it once the response is done.
+        Send button present → generation finished; send button absent → still generating.
+        """
+        for sel in self.send_button_selectors:
+            try:
+                btns = driver.find_elements(By.CSS_SELECTOR, sel)
+                for b in btns:
+                    try:
+                        if b.is_displayed() and b.is_enabled():
+                            return True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return False
+
+    def _response_area_present(self, driver: Any) -> bool:
+        """Return True if any configured response selector exists in the DOM."""
+        for sel in self.response_area_selectors:
+            try:
+                if driver.find_elements(By.CSS_SELECTOR, sel):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _stop_button_present(self, driver: Any) -> bool:
+        """Return True if the stop button is visible (model is still generating).
+
+        Used for early freeze detection: if stop button is visible but there's
+        no text expansion for > 20s, it's a silent hang.
+        """
+        for sel in self.stop_selectors:
+            try:
+                btns = driver.find_elements(By.CSS_SELECTOR, sel)
+                for b in btns:
+                    try:
+                        if b.is_displayed():
+                            return True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return False
+
+    def _find_response_container_element(
+        self,
+        driver: Any,
+    ) -> tuple[Any | None, str | None]:
+        """Return the most relevant response container element for configured selectors."""
+        for sel in self.response_area_selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, sel)
+                logger.debug(
+                    "[selenium] _find_response_container_element: selector=%s found %d elements",
+                    sel,
+                    len(elements),
+                )
+                if not elements:
+                    continue
+
+                visible = [el for el in elements if self._element_is_displayed(el)]
+                if visible:
+                    return visible[-1], sel
+                return elements[-1], sel
+            except Exception as exc:
+                logger.debug(
+                    "[selenium] _find_response_container_element: selector=%s error=%s",
+                    sel,
+                    exc,
+                )
+        return None, None
+
+    def _get_response_container_stats(
+        self,
+        driver: Any,
+        element: Any,
+    ) -> tuple[int, int]:
+        """Return generic container metrics used by the response watcher."""
+        try:
+            result = driver.execute_script(
+                "const el = arguments[0];"
+                "return [el?.innerText?.length || 0, el?.childElementCount || 0];",
+                element,
+            )
+            if (
+                isinstance(result, list)
+                and len(result) == 2
+                and isinstance(result[0], int)
+                and isinstance(result[1], int)
+            ):
+                return result[0], result[1]
+        except Exception as exc:
+            logger.debug(
+                "[selenium] _get_response_container_stats: JS failed: %s",
+                exc,
+            )
+
+        try:
+            text = (element.text or "").strip()
+            count = int(getattr(element, "childElementCount", 0) or 0)
+            return len(text), count
+        except Exception:
+            return 0, 0
+
+    def _extract_response_text_from_element(
+        self,
+        driver: Any,
+        element: Any,
+    ) -> str:
+        """Extract the response text from the watched container element."""
+        try:
+            result = driver.execute_script(
+                "const el = arguments[0];"
+                "return el && (el.innerText || el.textContent) ? (el.innerText || el.textContent).trim() : '';",
+                element,
+            )
+            if isinstance(result, str):
+                return result.strip()
+        except Exception as exc:
+            logger.debug(
+                "[selenium] _extract_response_text_from_element: JS failed: %s",
+                exc,
+            )
+
+        try:
+            return (element.text or "").strip()
+        except Exception:
+            return ""
+
+    def _log_response_container_diagnostics(
+        self,
+        selector: str | None,
+        current_text_length: int,
+        current_child_count: int,
+        previous_text_length: int,
+        previous_child_count: int,
+        stable_counter: int,
+        iteration: int,
+    ) -> None:
+        """Log detailed watcher diagnostics for each monitoring iteration."""
+        logger.debug(
+            "[selenium] watcher iteration=%d selector=%s current_text_length=%d current_child_count=%d previous_text_length=%d previous_child_count=%d stable_counter=%d",
+            iteration,
+            selector,
+            current_text_length,
+            current_child_count,
+            previous_text_length,
+            previous_child_count,
+            stable_counter,
+        )
 
     def _find_interactable_element(
         self,
@@ -805,85 +2079,173 @@ class SeleniumLLMBase:
             except Exception as e:
                 if self._is_dead_session(e):
                     raise  # propagate to _sync_generate_response for driver reset
+        # Fallback: some rich editor areas are visible but not considered clickable
+        for sel in ordered:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in elements:
+                    try:
+                        if el.is_displayed():
+                            logger.debug(
+                                f"[selenium] Found visible element fallback: {sel}"
+                            )
+                            if cache_attr:
+                                setattr(self, cache_attr, sel)
+                            return el
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
         logger.warning("[selenium] No interactable element found")
         return None
 
-    def _fill_input(self, driver: Any, element: Any, text: str) -> None:
-        """Type *text* into a textarea or contenteditable element."""
-        try:
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block:'center'});", element
-            )
-            time.sleep(0.2)
-        except Exception:
-            pass
+    def _normalize_input_text(self, text: str) -> str:
+        return " ".join(text.replace("\r\n", "\n").strip().split())
 
+    def _get_input_text(self, driver: Any, element: Any) -> str:
         try:
-            element.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", element)
-        time.sleep(0.1)
-
-        tag = (element.tag_name or "").lower()
-        if tag in ("textarea", "input"):
-            # Standard form inputs: clear via clear() then type
-            try:
-                element.clear()
-            except Exception:
-                try:
-                    element.send_keys(Keys.CONTROL + "a")
-                    element.send_keys(Keys.DELETE)
-                except Exception:
-                    pass
-            element.send_keys(text)
-        else:
-            # contenteditable (ProseMirror, Quill, …)
-            # Prefer JS execCommand: instant, no char-by-char latency.  Fall back
-            # to send_keys if execCommand is unavailable or raises.
-            js_ok = False
-            try:
-                driver.execute_script(
-                    "arguments[0].focus();"
-                    "document.execCommand('selectAll', false, null);"
-                    "document.execCommand('insertText', false, arguments[1]);",
-                    element,
-                    text,
-                )
-                js_ok = True
-            except Exception:
-                pass
-            if not js_ok:
-                try:
-                    element.send_keys(Keys.CONTROL + "a")
-                    time.sleep(0.05)
-                    element.send_keys(text)
-                except Exception as e:
-                    logger.error(f"[selenium] fill_input send_keys failed: {e}")
-                    raise
-            else:
-                # Some frameworks distinguish programmatic updates from user key events.
-                # Trigger a whitespace keypress + backspace to force UI internals to re-evaluate
-                # and enable the send button as if input was typed by the user.
-                try:
-                    element.send_keys(Keys.SPACE, Keys.BACKSPACE)
-                except Exception:
-                    pass
-
-        # Dispatch input/change events so that React/Vue/framework state machines
-        # immediately enable the send button without waiting for synthetic events.
-        try:
-            driver.execute_script(
-                "arguments[0].dispatchEvent("
-                "  new InputEvent('input', {bubbles:true, cancelable:true})"
-                ");"
-                "arguments[0].dispatchEvent("
-                "  new Event('change', {bubbles:true})"
-                ");",
+            tag = (element.tag_name or "").lower()
+            if tag in ("textarea", "input"):
+                return str(element.get_attribute("value") or "")
+            actual = driver.execute_script(
+                "const el = arguments[0];"
+                "if (el.value !== undefined) return el.value || '';"
+                "const text = el.innerText || el.textContent || '';"
+                "return text;",
                 element,
             )
+            return str(actual or "")
         except Exception:
-            pass
-        logger.debug(f"[selenium] Filled input ({len(text)} chars)")
+            return ""
+
+    def _verify_input_text(self, driver: Any, element: Any, expected: str) -> bool:
+        expected_norm = self._normalize_input_text(expected)
+        end_time = time.time() + 1.0
+        actual = ""
+        while time.time() < end_time:
+            actual = self._get_input_text(driver, element)
+            if self._normalize_input_text(actual) == expected_norm:
+                return True
+            time.sleep(0.1)
+        logger.warning(
+            "[selenium] fill_input verification failed: expected %s chars, got %s chars",
+            len(expected_norm),
+            len(self._normalize_input_text(actual)),
+        )
+        logger.debug("[selenium] fill_input actual content=%r", actual)
+        return False
+
+    def _fill_input(self, driver: Any, element: Any, text: str) -> None:
+        """Type *text* into a textarea or contenteditable element."""
+        attempts = 0
+        while True:
+            try:
+                try:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", element
+                    )
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+
+                try:
+                    element.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", element)
+                    time.sleep(0.1)
+
+                tag = (element.tag_name or "").lower()
+                if tag in ("textarea", "input"):
+                    # Standard form inputs: clear via clear() then type
+                    try:
+                        element.clear()
+                    except Exception as exc:
+                        if isinstance(exc, StaleElementReferenceException):
+                            raise
+                        try:
+                            element.send_keys(Keys.CONTROL + "a")
+                            element.send_keys(Keys.DELETE)
+                        except Exception as exc2:
+                            if isinstance(exc2, StaleElementReferenceException):
+                                raise
+                            pass
+                    element.send_keys(text)
+                else:
+                    # contenteditable (ProseMirror, Quill, …)
+                    # Prefer JS execCommand: instant, no char-by-char latency.  Fall back
+                    # to send_keys if execCommand is unavailable or raises.
+                    js_ok = False
+                    try:
+                        driver.execute_script(
+                            "arguments[0].focus();"
+                            "document.execCommand('selectAll', false, null);"
+                            "document.execCommand('insertText', false, arguments[1]);",
+                            element,
+                            text,
+                        )
+                        js_ok = True
+                    except Exception:
+                        pass
+                    if not js_ok:
+                        try:
+                            element.send_keys(Keys.CONTROL + "a")
+                            time.sleep(0.05)
+                            element.send_keys(text)
+                        except Exception as e:
+                            if isinstance(e, StaleElementReferenceException):
+                                raise
+                            logger.error(f"[selenium] fill_input send_keys failed: {e}")
+                            raise
+                    else:
+                        # Some frameworks distinguish programmatic updates from user key events.
+                        # Trigger a whitespace keypress + backspace to force UI internals to re-evaluate
+                        # and enable the send button as if input was typed by the user.
+                        try:
+                            element.send_keys(Keys.SPACE, Keys.BACKSPACE)
+                        except Exception:
+                            pass
+
+                # Dispatch input/change events so that React/Vue/framework state machines
+                # immediately enable the send button without waiting for synthetic events.
+                try:
+                    driver.execute_script(
+                        "const el = arguments[0];"
+                        "const evOpt = {bubbles:true, cancelable:true, composed:true};"
+                        "el.dispatchEvent(new InputEvent('input', evOpt));"
+                        "el.dispatchEvent(new KeyboardEvent('keyup', evOpt));"
+                        "el.dispatchEvent(new Event('change', evOpt));"
+                        "el.dispatchEvent(new Event('blur', evOpt));",
+                        element,
+                    )
+                except Exception:
+                    pass
+                logger.debug(f"[selenium] Filled input ({len(text)} chars)")
+                if not self._verify_input_text(driver, element, text):
+                    raise RuntimeError(
+                        "[selenium] fill_input verification failed: prompt content did not match expected text"
+                    )
+                return
+            except StaleElementReferenceException as exc:
+                attempts += 1
+                logger.warning(
+                    "[selenium] fill_input stale element reference; retrying (%s/2): %s",
+                    attempts,
+                    exc,
+                )
+                if attempts >= 2:
+                    raise
+                element = self._find_interactable_element(
+                    driver,
+                    self.prompt_area_selectors,
+                    timeout=5.0,
+                    cache_attr="_cached_prompt_selector",
+                )
+                if element is None:
+                    raise RuntimeError(
+                        "Could not find prompt input area after stale element during fill_input"
+                    )
+                continue
 
     def _paste_file(self, driver: Any, element: Any, base64_data: str) -> None:
         """Inject a base64 string as a Clipboard paste event directly into the input element."""
@@ -940,7 +2302,7 @@ class SeleniumLLMBase:
         Retries stale element references and transient failures to avoid dropped
         prompts where the UI updates between finding and clicking the button.
         """
-        max_attempts = int(os.getenv("SELENIUM_SEND_CLICK_RETRIES", "3"))
+        max_attempts = int(os.getenv("SELENIUM_SEND_CLICK_RETRIES", "1"))
 
         def _is_button_blacklisted(btn: Any) -> bool:
             for bl_sel in self.send_button_blacklist:
@@ -976,12 +2338,21 @@ class SeleniumLLMBase:
             return False
 
         def _resolve_click_target(element: Any) -> Any:
-            """If selector matches icon SVG, resolve up to a parent button."""
+            """If selector matches icon SVG or inner span, resolve up to a parent button or role='button'."""
             try:
-                if element.tag_name.lower() == "svg":
-                    parent_btn = element.find_element(By.XPATH, "ancestor::button[1]")
-                    if parent_btn is not None:
-                        return parent_btn
+                tag = (element.tag_name or "").lower()
+                if tag in ("svg", "path", "span", "mat-icon", "i"):
+                    # Climb up to find something that looks like a click target
+                    parent = driver.execute_script(
+                        "let el = arguments[0];"
+                        "while (el && el.tagName !== 'BODY') {"
+                        "  if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' || el.onclick) return el;"
+                        "  el = el.parentElement;"
+                        "}"
+                        "return arguments[0];",
+                        element
+                    )
+                    return parent if parent else element
             except Exception:
                 pass
             return element
@@ -1025,22 +2396,22 @@ class SeleniumLLMBase:
                     for btn in candidates:
                         try:
                             resolved_btn = _resolve_click_target(btn)
-                            if resolved_btn.is_displayed() and resolved_btn.is_enabled():
-                                try:
+                            if resolved_btn.is_displayed():
+                                enabled = resolved_btn.is_enabled()
+                                # Some frameworks use 'disabled' attribute on non-button elements
+                                aria_disabled = resolved_btn.get_attribute("aria-disabled") == "true"
+                                if enabled and not aria_disabled:
                                     if _safe_click(resolved_btn, sel):
                                         self._cached_send_selector = sel
                                         return True
-                                except StaleElementReferenceException as e:
-                                    logger.warning(
-                                        f"[selenium] Stale send button in fallback for selector {sel}; continuing: {e}"
-                                    )
-                                    if self._cached_send_selector == sel:
-                                        self._cached_send_selector = None
-                                    continue
+                                else:
+                                    logger.debug(f"[selenium] Button {sel} found but disabled (enabled={enabled}, aria_disabled={aria_disabled})")
                         except StaleElementReferenceException as e:
                             logger.warning(
-                                f"[selenium] Stale resolved send button for selector {sel}; continuing: {e}"
+                                f"[selenium] Stale send button in fallback for selector {sel}; continuing: {e}"
                             )
+                            if self._cached_send_selector == sel:
+                                self._cached_send_selector = None
                             continue
                         except Exception:
                             pass
@@ -1058,7 +2429,13 @@ class SeleniumLLMBase:
                 )
                 self._cached_prompt_selector = None
                 self._cached_send_selector = None
-                time.sleep(0.3)
+                # Try to escape any popups or overlays that might be blocking the click
+                try:
+                    driver.execute_script("document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));")
+                    input_el.send_keys(Keys.ESCAPE)
+                except Exception:
+                    pass
+                time.sleep(0.5)
 
             try:
                 if _attempt_click():
@@ -1088,6 +2465,50 @@ class SeleniumLLMBase:
             return
         except Exception as e:
             logger.error(f"[selenium] Could not send prompt: {e}")
+
+    def _wait_for_send_ready(self, driver: Any, timeout: float = 10.0) -> bool:
+        """Wait until the send button appears (LLM finished generating).
+
+        Used by chunked sending - we only care that the LLM has finished generating,
+        then we can fill the next chunk and click send when ready.
+        Polls every 0.3 s up to *timeout* seconds.
+        Env var: ``SELENIUM_SEND_READY_TIMEOUT`` overrides the default.
+        """
+        timeout = float(os.getenv("SELENIUM_SEND_READY_TIMEOUT", str(timeout)))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # Check: Send button is ready (LLM finished generating)
+            for sel in self.send_button_selectors:
+                try:
+                    btns = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for btn in btns:
+                        try:
+                            if btn.is_displayed() and btn.is_enabled():
+                                # Additional check: verify it's not a blacklisted element by checking attributes
+                                aria_label = btn.get_attribute("aria-label") or ""
+                                data_testid = btn.get_attribute("data-testid") or ""
+                                tag = btn.tag_name or ""
+                                
+                                # Skip if it looks like stop/cancel/mic button
+                                skip = False
+                                for pattern in ["stop", "cancel", "mic", "voice"]:
+                                    if pattern in aria_label.lower() or pattern in data_testid.lower():
+                                        skip = True
+                                        break
+                                if tag == "mat-icon" and "mic" in (btn.get_attribute("fonticon") or "").lower():
+                                    skip = True
+                                    
+                                if not skip:
+                                    logger.debug(f"[selenium] Send button ready: {sel}")
+                                    return True
+                        except Exception:
+                            pass
+                except Exception as e:
+                    if self._is_dead_session(e):
+                        raise
+            time.sleep(0.2)
+        logger.warning(f"[selenium] Send button did not become ready within {timeout:.1f}s")
+        return False
 
     def _post_send_check(self, driver: Any, timeout: float = 15.0) -> bool:
         """Return True if the LLM accepted the prompt (stop button or new text appeared).
@@ -1122,7 +2543,27 @@ class SeleniumLLMBase:
             if cur and cur != baseline:
                 logger.debug("[selenium] post_send_check: new response text appeared — send accepted")
                 return True
-            time.sleep(0.5)
+            # Fallback: if the send button has disappeared the LLM is generating.
+            # Guard: if we are already on a redirect URL, don't interpret absent
+            # send button as "generation started" — it means the page changed.
+            _fb_url = ""
+            try:
+                _fb_url = driver.current_url or ""
+            except Exception:
+                pass
+            if self.service_url and _fb_url and not _fb_url.startswith(self.service_url):
+                logger.warning("[selenium] post_send_check: redirect detected — returning False")
+                return False
+            if not self._send_button_present(driver):
+                if self._response_area_present(driver):
+                    logger.debug(
+                        "[selenium] post_send_check fallback: send button absent and response area detected — generation in progress"
+                    )
+                    return True
+                logger.debug(
+                    "[selenium] post_send_check fallback: send button absent but no response area detected yet"
+                )
+            time.sleep(0.2)
 
         # Timeout expired — check if we are still on the expected page
         cur_url = ""
@@ -1144,110 +2585,187 @@ class SeleniumLLMBase:
         """Wait for the LLM response to fully stream, then return its text.
 
         Strategy:
-        1. Take current last response as baseline (conversation history).
-        2. Wait up to 30 s for a new response text different from baseline.
-        3. Poll until the response is stable (1 s) and stop button disappears.
+        1. Wait for the response container to appear and begin emitting text.
+        2. After a 3 second grace delay, poll the container every 1 second.
+        3. Track innerText length and childElementCount.
+        4. If either metric changes, generation is still in progress.
+        5. If both remain unchanged for 2 consecutive checks after activity starts,
+           assume generation has finished.
         """
-        baseline = self._get_latest_response_text(driver)
-
-        initial_timeout = float(os.getenv("SELENIUM_RESPONSE_INITIAL_TIMEOUT", "60"))
-        start = time.time()
-        poll_interval = 0.1
-        while time.time() - start < initial_timeout:
-            cur = self._get_latest_response_text(driver)
-            if cur and cur != baseline:
-                logger.debug("[selenium] New response text appeared")
-                break
-            time.sleep(poll_interval)
-            poll_interval = min(poll_interval * 2, 1.0)
+        self._click_accept_buttons(driver, timeout=2.0)
+        baseline = ""
+        if self._use_baseline_comparison:
+            baseline = self._get_latest_response_text(driver)
+            logger.debug("[selenium] Baseline text length: %d", len(baseline))
         else:
+            logger.debug("[selenium] Skipping baseline comparison for this engine")
+
+        self._generation_was_active = False
+
+        logger.debug("[selenium] watcher initial delay: 3.0s before response monitoring")
+        time.sleep(3.0)
+
+        _engine_max_wait = getattr(self, "_response_max_wait", None)
+        effective_max_wait = int(_engine_max_wait) if _engine_max_wait else max_wait
+        max_wait = int(os.getenv("SELENIUM_RESPONSE_MAX_WAIT", str(effective_max_wait)))
+        deadline = time.time() + max_wait
+
+        previous_text_length = -1
+        previous_child_count = -1
+        stable_counter = 0
+        iteration = 0
+        last_container = None
+        last_activity_time = time.time()
+
+        while time.time() < deadline:
+            iteration += 1
+            container, selector = self._find_response_container_element(driver)
+            if container is None:
+                logger.debug(
+                    "[selenium] watcher iteration=%d no response container element found",
+                    iteration,
+                )
+                self._log_response_container_diagnostics(
+                    None,
+                    0,
+                    0,
+                    previous_text_length,
+                    previous_child_count,
+                    stable_counter,
+                    iteration,
+                )
+            else:
+                last_container = container
+                current_text_length, current_child_count = self._get_response_container_stats(
+                    driver, container
+                )
+                self._log_response_container_diagnostics(
+                    selector,
+                    current_text_length,
+                    current_child_count,
+                    previous_text_length,
+                    previous_child_count,
+                    stable_counter,
+                    iteration,
+                )
+
+                if (
+                    previous_text_length != -1 and previous_child_count != -1
+                ):
+                    if (
+                        current_text_length != previous_text_length
+                        or current_child_count != previous_child_count
+                    ):
+                        stable_counter = 0
+                        self._generation_was_active = True
+                        last_activity_time = time.time()
+                    elif current_text_length > 0 or current_child_count > 0:
+                        if not baseline or self._extract_response_text_from_element(
+                            driver, container
+                        ) != baseline:
+                            stable_counter += 1
+                        else:
+                            stable_counter = 0
+                    else:
+                        stable_counter = 0
+                previous_text_length = current_text_length
+                previous_child_count = current_child_count
+
+                # Early freeze detection: if the "Stop" button is present but
+                # there's been no text expansion for > 20s, it's a silent hang.
+                if self._stop_button_present(driver) and (time.time() - last_activity_time) > 20:
+                    logger.warning("[selenium] Silent freeze detected: Stop button visible but no activity for 20s")
+                    raise TimeoutException("Silent freeze detected during generation")
+
+                if stable_counter >= 2:
+                    response = self._extract_response_text_from_element(driver, container)
+                    if response:
+                        logger.debug(
+                            "[selenium] watcher detected stable response after %d iterations",
+                            iteration,
+                        )
+                        return response
+
+            if self._is_limit_present(driver):
+                raise RuntimeError(
+                    "selenium_response_detection_timeout: service limit detected "
+                    "during response wait (quota/rate-limit page shown)"
+                )
+            if self._is_captcha_present(driver):
+                raise RuntimeError(
+                    "selenium_response_detection_timeout: CAPTCHA detected "
+                    "during response wait"
+                )
+
+            time.sleep(1.0)
+
+        if last_container is not None:
+            result = self._extract_response_text_from_element(driver, last_container)
+        else:
+            result = self._get_latest_response_text(driver)
+
+        if result:
             logger.warning(
-                f"[selenium] Response area did not produce new text within {initial_timeout}s"
+                "[selenium] Response wait timed out, returning best-effort result"
             )
+            return result
 
-        max_wait = int(os.getenv("SELENIUM_RESPONSE_MAX_WAIT", str(max_wait)))
+        raise RuntimeError(
+            "selenium_response_detection_timeout: no new response text appeared "
+            "in expected selectors within the allotted time"
+        )
 
-        start = time.time()
-        first_new = ""
-        stable_since = time.time()
+    def _click_accept_buttons(self, driver: Any, timeout: float = 2.0) -> None:
+        """Click any configured accept buttons that appear before continuing."""
+        if not self.accept_button_selectors:
+            return
 
-        while time.time() - start < max_wait:
-            generating = False
-            for sel in self.stop_selectors:
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            clicked_any = False
+            for sel in self.accept_button_selectors:
                 try:
-                    btns = driver.find_elements(By.CSS_SELECTOR, sel)
-                    for b in btns:
-                        try:
-                            if b.is_displayed():
-                                generating = True
-                                break
-                        except Exception:
-                            pass
-                    if generating:
-                        break
-                except Exception as e:
-                    if self._is_dead_session(e):
-                        logger.error("[selenium] Driver died during stop-button check")
-                        raise
+                    buttons = driver.find_elements(By.CSS_SELECTOR, sel)
+                except Exception:
+                    continue
 
-            if generating:
-                time.sleep(0.5)
-                stable_since = time.time()
-                continue
+                for button in buttons:
+                    try:
+                        if button.is_displayed() and button.is_enabled():
+                            button.click()
+                            clicked_any = True
+                            logger.debug(
+                                f"[selenium] Clicked accept button with selector: {sel}"
+                            )
+                    except Exception:
+                        continue
 
-            cur = self._get_latest_response_text(driver)
-            cur_url = ""
-            try:
-                cur_url = driver.current_url or ""
-            except Exception:
-                pass
-
-            if cur and cur != baseline:
-                if first_new == "" or cur != first_new:
-                    first_new = cur
-                    stable_since = time.time()
-                    logger.debug("[selenium] New response candidate captured")
-
-                if self.service_url and not cur_url.startswith(self.service_url):
-                    logger.warning(
-                        "[selenium] Detected navigation away from service URL; returning captured text"
-                    )
-                    return first_new
-
-                if time.time() - stable_since >= 1.0:
-                    logger.debug("[selenium] Response stable — done")
-                    return first_new
-            elif first_new:
-                if time.time() - stable_since >= 1.0:
-                    logger.debug("[selenium] First new response stable — done")
-                    return first_new
-
-            time.sleep(0.3)
-
-        logger.warning("[selenium] Response wait timed out, returning best-effort result")
-        return first_new or baseline
+            if clicked_any:
+                return
+            time.sleep(0.25)
 
     # ------------------------------------------------------------------ /helpers
 
     async def stop(self) -> None:
-        """Quit the driver and clean up."""
+        """Detach from the shared driver and persist cookies.
+
+        The shared Chrome process is **not** quit here — other engines may
+        still need it.  Call :func:`shutdown_shared_driver` (via
+        ``EngineManager.stop_all``) to actually terminate Chrome.
+        """
 
         def _sync_stop() -> None:
             if self.driver is not None:
-                try:
-                    self.driver.quit()
-                except Exception as e:
-                    logger.warning(f"[selenium] driver.quit() error: {e}")
-            self._cleanup_chromium_remnants()
+                self._save_cookies()
 
         try:
             await asyncio.wait_for(asyncio.to_thread(_sync_stop), timeout=10)
         except TimeoutError:
-            logger.warning("[selenium] stop() timed out — force-cleaning remnants")
-            self._cleanup_chromium_remnants()
+            logger.warning("[selenium] stop() cookie-save timed out")
         except Exception as e:
             logger.warning(f"[selenium] stop() error: {e}")
         finally:
             self.driver = None
             self._initialized = False
             self._driver_pid = None
+            self._cookies_restored = False
