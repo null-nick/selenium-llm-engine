@@ -310,12 +310,30 @@ class DuckAIEngine(SeleniumLLMBase):
                 element,
             )
             if isinstance(result, str) and result.strip():
-                return result.strip()
+                cleaned = result.strip()
+                if self._is_transient_response_text(cleaned):
+                    return ""
+                return cleaned
         except Exception:
             pass
 
         text = super()._extract_response_text_from_element(driver, element)
-        return self._strip_response_header(text)
+        cleaned = self._strip_response_header(text)
+        if self._is_transient_response_text(cleaned):
+            return ""
+        return cleaned
+
+    def _is_transient_response_text(self, text: str) -> bool:
+        normalized = " ".join((text or "").split()).strip().lower()
+        if not normalized:
+            return True
+        return normalized in {
+            "searching the web",
+            "searching web",
+            "searching",
+            "thinking",
+            "loading",
+        }
 
     def _strip_response_header(self, text: str) -> str:
         if not text:
