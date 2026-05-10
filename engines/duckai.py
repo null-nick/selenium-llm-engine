@@ -296,6 +296,24 @@ class DuckAIEngine(SeleniumLLMBase):
         return None
 
     def _extract_response_text_from_element(self, driver: Any, element: Any) -> str:
+        try:
+            result = driver.execute_script(
+                "const root = arguments[0];"
+                "if (!root) return '';"
+                "const blocks = Array.from(root.querySelectorAll('.space-y-4.whitespace-normal'));"
+                "for (let i = blocks.length - 1; i >= 0; i -= 1) {"
+                "  const node = blocks[i];"
+                "  const text = (node.innerText || node.textContent || '').trim();"
+                "  if (text) return text;"
+                "}"
+                "return '';",
+                element,
+            )
+            if isinstance(result, str) and result.strip():
+                return result.strip()
+        except Exception:
+            pass
+
         text = super()._extract_response_text_from_element(driver, element)
         return self._strip_response_header(text)
 
