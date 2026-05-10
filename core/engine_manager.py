@@ -305,6 +305,7 @@ class _PromptJob:
     future: asyncio.Future  # type: ignore[type-arg]
     media: list[Any] = field(default_factory=list)
     timeout: int | None = None
+    model_name: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -534,10 +535,18 @@ class EngineManager:
                 engine = await self.set_active_engine(engine_name)  # lazy-init browser here & teardown previous
                 try:
                     result_text = await engine.generate_response(
-                        job.prompt, job.media, timeout=job.timeout,
+                        job.prompt,
+                        job.media,
+                        timeout=job.timeout,
+                        model_name=job.model_name,
                     )
                 except TypeError:
-                    result_text = await engine.generate_response(job.prompt)
+                    try:
+                        result_text = await engine.generate_response(
+                            job.prompt, job.media, timeout=job.timeout,
+                        )
+                    except TypeError:
+                        result_text = await engine.generate_response(job.prompt)
                 model_name = engine.get_current_model()
                 elapsed = _time.time() - worker_start
                 logger.info(
@@ -565,6 +574,7 @@ class EngineManager:
         prompt: str,
         media: list[Any] | None = None,
         timeout: int | None = None,
+        model_name: str | None = None,
     ) -> _PromptResult:
         """Submit *prompt* and optional media to the named engine's FIFO queue.
 
@@ -583,7 +593,14 @@ class EngineManager:
         queue = self._get_or_create_queue(canonical)
         loop = asyncio.get_event_loop()
         future: asyncio.Future[_PromptResult] = loop.create_future()
-        job = _PromptJob(prompt=prompt, images=[], future=future, media=media or [], timeout=timeout)
+        job = _PromptJob(
+            prompt=prompt,
+            images=[],
+            future=future,
+            media=media or [],
+            timeout=timeout,
+            model_name=model_name,
+        )
         job._queued_at = _time.time()  # type: ignore[attr-defined]
         self._ensure_workers(canonical)
         await queue.put(job)

@@ -13,6 +13,7 @@ def test_engine_manager_loads_custom_engines():
         assert "copilot" in engine_names
         assert "grok" in engine_names
         assert "perplexity" in engine_names
+        assert "duckai" in engine_names
     finally:
         EngineManager._instance = orig_instance
 

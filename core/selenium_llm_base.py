@@ -275,6 +275,26 @@ class SeleniumLLMBase:
             "model_name": self.get_current_model(),
         }
 
+    def _canonicalize_requested_model(self, model_name: str | None) -> str | None:
+        if model_name is None:
+            return None
+        requested = str(model_name).strip()
+        if not requested:
+            return None
+        engine_name = str(getattr(self, "ENGINE_NAME", "")).strip().lower()
+        if ":" in requested:
+            engine_hint, variant = requested.split(":", 1)
+            if engine_hint.strip().lower() == engine_name:
+                requested = variant.strip()
+        lowered = requested.lower()
+        if lowered in {"", "default", engine_name}:
+            return None
+        return requested
+
+    def _prepare_for_prompt(self, driver: Any, model_name: str | None) -> None:
+        """Optional per-engine hook executed after navigation but before prompt send."""
+        return None
+
     def _locate_chromium_binary(self) -> Optional[str]:
         possible = [
             "/usr/bin/chromium",
@@ -718,7 +738,11 @@ class SeleniumLLMBase:
             return {"logged_in": False, "login_state": "unknown", "error": str(e)}
 
     async def generate_response(
-        self, prompt: str, media: list[Any] | None = None, timeout: int | None = None,
+        self,
+        prompt: str,
+        media: list[Any] | None = None,
+        timeout: int | None = None,
+        model_name: str | None = None,
     ) -> str:
         """Send prompt and optional media to the LLM service and return the response text.
 
@@ -743,7 +767,7 @@ class SeleniumLLMBase:
 
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(self._sync_generate_response, prompt, media),
+                asyncio.to_thread(self._sync_generate_response, prompt, media, model_name),
                 timeout=total_timeout,
             )
         except asyncio.TimeoutError:
@@ -1082,15 +1106,23 @@ class SeleniumLLMBase:
 
     # ------------------------------------------------------------------ core flow
 
-    def _sync_generate_response(self, prompt: str, media: list[Any] | None = None) -> str:
+    def _sync_generate_response(
+        self,
+        prompt: str,
+        media: list[Any] | None = None,
+        model_name: str | None = None,
+    ) -> str:
         """Synchronous core of generate_response — runs in a worker thread."""
         max_attempts = 5
         for attempt in range(max_attempts):
             try:
                 try:
-                    return self._sync_generate_response_once(prompt, media)
+                    return self._sync_generate_response_once(prompt, media, model_name)
                 except TypeError:
-                    return self._sync_generate_response_once(prompt)
+                    try:
+                        return self._sync_generate_response_once(prompt, media)
+                    except TypeError:
+                        return self._sync_generate_response_once(prompt)
             except (RuntimeError, TimeoutException) as e:
                 is_chunking_freeze = any(msg in str(e) for msg in [
                     "Send button did not become ready after final chunk",
@@ -1166,7 +1198,12 @@ class SeleniumLLMBase:
             
         raise RuntimeError("_sync_generate_response exhausted retries")
 
-    def _sync_generate_response_once(self, prompt: str, media: list[Any] | None = None) -> str:
+    def _sync_generate_response_once(
+        self,
+        prompt: str,
+        media: list[Any] | None = None,
+        model_name: str | None = None,
+    ) -> str:
         """Single attempt of the core generate flow."""
         t0 = time.time()
         self._ensure_ready()
@@ -1218,6 +1255,10 @@ class SeleniumLLMBase:
                 "⚠️ The service appears to have hit a usage limit. "
                 "Please upgrade or wait, usually until tomorrow, before retrying."
             )
+
+        requested_model = self._canonicalize_requested_model(model_name)
+        if requested_model is not None:
+            self._prepare_for_prompt(driver, requested_model)
 
         if media:
             tier = self._check_account_tier(driver)

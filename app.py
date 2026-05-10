@@ -771,8 +771,13 @@ async def _prompt(
             async def generate_stream():
                 try:
                     result_future = asyncio.ensure_future(
-                        mgr.enqueue(engine_name, prompt_text, media_items,
-                                    timeout=timeout)
+                        mgr.enqueue(
+                            engine_name,
+                            prompt_text,
+                            media_items,
+                            timeout=timeout,
+                            model_name=model_name,
+                        )
                     )
 
                     heartbeat_interval = 5.0
@@ -813,8 +818,13 @@ async def _prompt(
 
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
-        result_obj = await mgr.enqueue(engine_name, prompt_text, media_items,
-                                        timeout=timeout)
+        result_obj = await mgr.enqueue(
+            engine_name,
+            prompt_text,
+            media_items,
+            timeout=timeout,
+            model_name=model_name,
+        )
         duration_ms = int((time.time() - start) * 1000)
         if media_items:
             inc_media_sent(len(media_items))

@@ -28,6 +28,7 @@ class DummyEngine:
         self.model = "default"
         self._stopped = False
         self.last_media: list[Any] = []
+        self.last_model_name: str | None = None
 
     def get_interface_limits(self):
         return {"max_prompt_chars": 1234, "model_name": "default"}
@@ -41,8 +42,11 @@ class DummyEngine:
     async def check_login_state(self):
         return {"logged_in": False, "login_state": "unlogged"}
 
-    async def generate_response(self, prompt, media=None, timeout=None):
+    async def generate_response(self, prompt, media=None, timeout=None, model_name=None):
         self.last_media = media or []
+        self.last_model_name = model_name
+        if model_name:
+            self.model = str(model_name).split(":", 1)[-1]
         return "dummy response"
 
     async def stop(self):
@@ -266,6 +270,20 @@ def test_prompt_dynamic_endpoint_alias():
     """Engine aliases should work on the dynamic endpoint too."""
     response = client.post("/engine/openai/prompt", json={"prompt": "Hello"})
     assert response.status_code == 200
+
+
+def test_model_variant_reaches_engine():
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "chatgpt:gpt-4o-mini",
+            "messages": [{"role": "user", "content": "Hi"}],
+        },
+    )
+    assert response.status_code == 200
+    engine = EngineManager.get().engines["chatgpt"]
+    assert engine.last_model_name == "chatgpt:gpt-4o-mini"
+    assert response.json()["model"] == "gpt-4o-mini"
 
 
 def test_multimodal_text_and_image():
