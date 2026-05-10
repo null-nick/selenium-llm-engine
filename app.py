@@ -598,6 +598,7 @@ async def engine_prompt(engine_name: str, req: Request) -> Any:
         req,
         explicit_prompt=data.get("prompt") or data.get("messages"),
         model_name=data.get("model", canonical),
+        reasoning_mode=data.get("reasoning_mode"),
         stream=bool(data.get("stream", False)),
         timeout=data.get("timeout"),
     )
@@ -713,7 +714,12 @@ async def openai_chat(req: Request) -> Any:
     stream = bool(data.get("stream", False))
 
     return await _prompt(
-        engine, req, explicit_prompt=prompt_payload, model_name=model, stream=stream,
+        engine,
+        req,
+        explicit_prompt=prompt_payload,
+        model_name=model,
+        reasoning_mode=data.get("reasoning_mode"),
+        stream=stream,
         timeout=data.get("timeout"),
     )
 
@@ -729,6 +735,7 @@ async def _prompt(
     req: Request,
     explicit_prompt: Any = None,
     model_name: str = "default",
+    reasoning_mode: str | None = None,
     stream: bool = False,
     timeout: int | None = None,
 ) -> Any:
@@ -777,6 +784,7 @@ async def _prompt(
                             media_items,
                             timeout=timeout,
                             model_name=model_name,
+                            reasoning_mode=reasoning_mode,
                         )
                     )
 
@@ -824,6 +832,7 @@ async def _prompt(
             media_items,
             timeout=timeout,
             model_name=model_name,
+            reasoning_mode=reasoning_mode,
         )
         duration_ms = int((time.time() - start) * 1000)
         if media_items:

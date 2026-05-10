@@ -72,6 +72,7 @@ class EngineDescriptor:
     max_workers: int = 1
     media_capabilities: list[str] = field(default_factory=list)
     media_support: dict[str, Any] = field(default_factory=dict)
+    reasoning_modes: list[str] = field(default_factory=list)
 
     def limits_dict(self) -> dict:
         """Return interface-limits metadata without starting a browser."""
@@ -101,6 +102,7 @@ class EngineDescriptor:
         if self.media_support:
             data["media_support"] = self.media_support
         data["media_capabilities"] = list(self.media_capabilities)
+        data["reasoning_modes"] = list(self.reasoning_modes)
         return data
 
 
@@ -306,6 +308,7 @@ class _PromptJob:
     media: list[Any] = field(default_factory=list)
     timeout: int | None = None
     model_name: str | None = None
+    reasoning_mode: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +542,7 @@ class EngineManager:
                         job.media,
                         timeout=job.timeout,
                         model_name=job.model_name,
+                        reasoning_mode=job.reasoning_mode,
                     )
                 except TypeError:
                     try:
@@ -575,6 +579,7 @@ class EngineManager:
         media: list[Any] | None = None,
         timeout: int | None = None,
         model_name: str | None = None,
+        reasoning_mode: str | None = None,
     ) -> _PromptResult:
         """Submit *prompt* and optional media to the named engine's FIFO queue.
 
@@ -600,6 +605,7 @@ class EngineManager:
             media=media or [],
             timeout=timeout,
             model_name=model_name,
+            reasoning_mode=reasoning_mode,
         )
         job._queued_at = _time.time()  # type: ignore[attr-defined]
         self._ensure_workers(canonical)

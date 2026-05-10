@@ -360,6 +360,11 @@
                 <select id="model-select"></select>
                 <div id="model-select-info" style="margin-top:4px; color:#666; font-size:0.85rem;"></div>
             </div>
+            <div id="reasoning-select-wrap" style="display:none; margin-top:10px;">
+                <label for="reasoning-select">Reasoning</label>
+                <select id="reasoning-select"></select>
+                <div id="reasoning-select-info" style="margin-top:4px; color:#666; font-size:0.85rem;"></div>
+            </div>
             <label>Prompt</label>
             <textarea id="prompt-input" rows="4" placeholder="Type prompt…"></textarea>
             <label>Media attachments</label>
@@ -624,6 +629,46 @@
             modelInfo.textContent = 'This engine exposes multiple models. The selected one will be sent as ' + engineName + ':' + modelSelect.value;
         }
 
+        function updateReasoningDropdown() {
+            var engineSelect = document.getElementById('engine-select');
+            var wrap = document.getElementById('reasoning-select-wrap');
+            var select = document.getElementById('reasoning-select');
+            var info = document.getElementById('reasoning-select-info');
+            var modelSelect = document.getElementById('model-select');
+            if (!engineSelect || !wrap || !select || !info) return;
+
+            var engineName = engineSelect.value;
+            var engineMeta = getEngineMeta(engineName);
+            var modes = (engineMeta && Array.isArray(engineMeta.reasoning_modes)) ? engineMeta.reasoning_modes.slice() : [];
+            var selectedModel = (modelSelect && modelSelect.value) ? modelSelect.value : '';
+            var reasoningSupportedModels = {
+                'gpt-5-mini': true,
+                'gpt-4o-mini': true,
+                'claude-haiku-4-5': true,
+                'tinfoil/gpt-oss-120b': true
+            };
+            if (engineName !== 'duckai' || !modes.length || !reasoningSupportedModels[selectedModel]) {
+                wrap.style.display = 'none';
+                select.innerHTML = '';
+                info.textContent = '';
+                return;
+            }
+
+            wrap.style.display = 'block';
+            var labels = {
+                'fast': 'Fast',
+                'reasoning': 'Reasoning',
+                'extended-reasoning': 'Extended Reasoning'
+            };
+            var saved = localStorage.getItem('selenium_llm_reasoning_' + engineName + '_' + selectedModel);
+            var preferred = saved && modes.indexOf(saved) !== -1 ? saved : modes[0];
+            select.innerHTML = modes.map(function(mode) {
+                var selected = mode === preferred ? ' selected' : '';
+                return '<option value="' + mode + '"' + selected + '>' + (labels[mode] || mode) + '</option>';
+            }).join('');
+            info.textContent = 'Duck.ai reasoning mode will be sent as ' + select.value + '.';
+        }
+
         function populateEngineDropdowns() {
             var select = document.getElementById('engine-select');
             var prevEngine = select.value;
@@ -641,6 +686,7 @@
 
             updateDefaultEngineHint();
             updateModelDropdown();
+            updateReasoningDropdown();
         }
 
         function selectEngineFor(name) {
@@ -649,6 +695,7 @@
             _defaultEngine = name;
             updateDefaultEngineHint();
             updateModelDropdown();
+            updateReasoningDropdown();
             document.getElementById('prompt-input').focus();
         }
 
@@ -882,6 +929,11 @@
             if (selectedModel) {
                 localStorage.setItem('selenium_llm_model_' + engine, selectedModel);
             }
+            var reasoningSelect = document.getElementById('reasoning-select');
+            var selectedReasoning = (reasoningSelect && reasoningSelect.value) ? reasoningSelect.value : '';
+            if (selectedReasoning && selectedModel) {
+                localStorage.setItem('selenium_llm_reasoning_' + engine + '_' + selectedModel, selectedReasoning);
+            }
             var prompt = document.getElementById('prompt-input').value;
             var box = document.getElementById('response-box');
             box.textContent = 'Waiting\u2026';
@@ -901,6 +953,9 @@
                 };
                 if (selectedModel) {
                     payload.model = engine + ':' + selectedModel;
+                }
+                if (selectedReasoning) {
+                    payload.reasoning_mode = selectedReasoning;
                 }
                 var res = await fetchJson('/engine/' + engine + '/prompt', {
                     method: 'POST',
@@ -1034,6 +1089,7 @@
             if (engineSelect) {
                 engineSelect.addEventListener('change', function() {
                     updateModelDropdown();
+                    updateReasoningDropdown();
                 });
             }
             var modelSelect = document.getElementById('model-select');
@@ -1046,6 +1102,21 @@
                     var modelInfo = document.getElementById('model-select-info');
                     if (modelInfo && engineName && modelSelect.value) {
                         modelInfo.textContent = 'This engine exposes multiple models. The selected one will be sent as ' + engineName + ':' + modelSelect.value;
+                    }
+                    updateReasoningDropdown();
+                });
+            }
+            var reasoningSelect = document.getElementById('reasoning-select');
+            if (reasoningSelect) {
+                reasoningSelect.addEventListener('change', function() {
+                    var engineName = document.getElementById('engine-select').value;
+                    var modelName = document.getElementById('model-select').value;
+                    if (engineName && modelName) {
+                        localStorage.setItem('selenium_llm_reasoning_' + engineName + '_' + modelName, reasoningSelect.value);
+                    }
+                    var info = document.getElementById('reasoning-select-info');
+                    if (info && reasoningSelect.value) {
+                        info.textContent = 'Duck.ai reasoning mode will be sent as ' + reasoningSelect.value + '.';
                     }
                 });
             }

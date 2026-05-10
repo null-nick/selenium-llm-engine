@@ -291,7 +291,12 @@ class SeleniumLLMBase:
             return None
         return requested
 
-    def _prepare_for_prompt(self, driver: Any, model_name: str | None) -> None:
+    def _prepare_for_prompt(
+        self,
+        driver: Any,
+        model_name: str | None,
+        reasoning_mode: str | None = None,
+    ) -> None:
         """Optional per-engine hook executed after navigation but before prompt send."""
         return None
 
@@ -743,6 +748,7 @@ class SeleniumLLMBase:
         media: list[Any] | None = None,
         timeout: int | None = None,
         model_name: str | None = None,
+        reasoning_mode: str | None = None,
     ) -> str:
         """Send prompt and optional media to the LLM service and return the response text.
 
@@ -767,7 +773,13 @@ class SeleniumLLMBase:
 
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(self._sync_generate_response, prompt, media, model_name),
+                asyncio.to_thread(
+                    self._sync_generate_response,
+                    prompt,
+                    media,
+                    model_name,
+                    reasoning_mode,
+                ),
                 timeout=total_timeout,
             )
         except asyncio.TimeoutError:
@@ -1111,13 +1123,16 @@ class SeleniumLLMBase:
         prompt: str,
         media: list[Any] | None = None,
         model_name: str | None = None,
+        reasoning_mode: str | None = None,
     ) -> str:
         """Synchronous core of generate_response — runs in a worker thread."""
         max_attempts = 5
         for attempt in range(max_attempts):
             try:
                 try:
-                    return self._sync_generate_response_once(prompt, media, model_name)
+                    return self._sync_generate_response_once(
+                        prompt, media, model_name, reasoning_mode
+                    )
                 except TypeError:
                     try:
                         return self._sync_generate_response_once(prompt, media)
@@ -1204,6 +1219,7 @@ class SeleniumLLMBase:
         prompt: str,
         media: list[Any] | None = None,
         model_name: str | None = None,
+        reasoning_mode: str | None = None,
     ) -> str:
         """Single attempt of the core generate flow."""
         t0 = time.time()
@@ -1258,8 +1274,15 @@ class SeleniumLLMBase:
             )
 
         requested_model = self._canonicalize_requested_model(model_name)
-        if requested_model is not None:
-            self._prepare_for_prompt(driver, requested_model)
+        requested_reasoning_mode = (
+            str(reasoning_mode).strip() if reasoning_mode is not None else None
+        )
+        if requested_model is not None or requested_reasoning_mode:
+            self._prepare_for_prompt(
+                driver,
+                requested_model,
+                requested_reasoning_mode,
+            )
 
         if media:
             tier = self._check_account_tier(driver)
