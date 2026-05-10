@@ -355,6 +355,11 @@
                 <button onclick="setDefaultEngine(document.getElementById('engine-select').value)" style="white-space:nowrap;">Set default</button>
             </div>
             <div id="engine-default-info" style="margin-top:4px; color:#666; font-size:0.9rem;">Default engine: none</div>
+            <div id="model-select-wrap" style="display:none; margin-top:10px;">
+                <label for="model-select">Model</label>
+                <select id="model-select"></select>
+                <div id="model-select-info" style="margin-top:4px; color:#666; font-size:0.85rem;"></div>
+            </div>
             <label>Prompt</label>
             <textarea id="prompt-input" rows="4" placeholder="Type prompt…"></textarea>
             <label>Media attachments</label>
@@ -570,6 +575,55 @@
             }).join('');
         }
 
+        function getEngineMeta(name) {
+            return (_knownEngines || []).find(function(eng) { return eng.name === name; }) || null;
+        }
+
+        function getSelectableModels(engineMeta) {
+            if (!engineMeta) return [];
+            var rawModels = [];
+            if (typeof engineMeta.models === 'object' && !Array.isArray(engineMeta.models)) {
+                rawModels = Object.keys(engineMeta.models || {});
+            } else if (Array.isArray(engineMeta.models)) {
+                rawModels = engineMeta.models.slice();
+            }
+            return rawModels.filter(function(model) {
+                return model && model !== 'default' && model !== 'unlogged';
+            });
+        }
+
+        function updateModelDropdown() {
+            var engineSelect = document.getElementById('engine-select');
+            var modelWrap = document.getElementById('model-select-wrap');
+            var modelSelect = document.getElementById('model-select');
+            var modelInfo = document.getElementById('model-select-info');
+            if (!engineSelect || !modelWrap || !modelSelect || !modelInfo) return;
+
+            var engineName = engineSelect.value;
+            var engineMeta = getEngineMeta(engineName);
+            var selectableModels = getSelectableModels(engineMeta);
+
+            if (selectableModels.length <= 1) {
+                modelWrap.style.display = 'none';
+                modelSelect.innerHTML = '';
+                modelInfo.textContent = '';
+                return;
+            }
+
+            modelWrap.style.display = 'block';
+            var savedModel = localStorage.getItem('selenium_llm_model_' + engineName);
+            var preferredModel = savedModel || engineMeta.default_model || selectableModels[0];
+            if (selectableModels.indexOf(preferredModel) === -1) {
+                preferredModel = selectableModels[0];
+            }
+
+            modelSelect.innerHTML = selectableModels.map(function(model) {
+                var selected = model === preferredModel ? ' selected' : '';
+                return '<option value="' + model + '"' + selected + '>' + model + '</option>';
+            }).join('');
+            modelInfo.textContent = 'This engine exposes multiple models. The selected one will be sent as ' + engineName + ':' + modelSelect.value;
+        }
+
         function populateEngineDropdowns() {
             var select = document.getElementById('engine-select');
             var prevEngine = select.value;
@@ -586,14 +640,16 @@
             }
 
             updateDefaultEngineHint();
+            updateModelDropdown();
         }
 
         function selectEngineFor(name) {
             document.getElementById('engine-select').value = name;
-            document.getElementById('prompt-input').focus();
             localStorage.setItem('selenium_llm_default_engine', name);
             _defaultEngine = name;
             updateDefaultEngineHint();
+            updateModelDropdown();
+            document.getElementById('prompt-input').focus();
         }
 
         async function reloadEngines() {
@@ -821,6 +877,11 @@
         async function sendPrompt() {
             var engine = document.getElementById('engine-select').value;
             if (!engine) { alert('Select an engine first.'); return; }
+            var modelSelect = document.getElementById('model-select');
+            var selectedModel = (modelSelect && modelSelect.value) ? modelSelect.value : '';
+            if (selectedModel) {
+                localStorage.setItem('selenium_llm_model_' + engine, selectedModel);
+            }
             var prompt = document.getElementById('prompt-input').value;
             var box = document.getElementById('response-box');
             box.textContent = 'Waiting\u2026';
@@ -838,6 +899,9 @@
                         },
                     ],
                 };
+                if (selectedModel) {
+                    payload.model = engine + ':' + selectedModel;
+                }
                 var res = await fetchJson('/engine/' + engine + '/prompt', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -966,6 +1030,25 @@
         window.addEventListener('load', function() {
             setTheme(_currentTheme());   // sync button label with stored value
             setupLogAutoscroll();
+            var engineSelect = document.getElementById('engine-select');
+            if (engineSelect) {
+                engineSelect.addEventListener('change', function() {
+                    updateModelDropdown();
+                });
+            }
+            var modelSelect = document.getElementById('model-select');
+            if (modelSelect) {
+                modelSelect.addEventListener('change', function() {
+                    var engineName = document.getElementById('engine-select').value;
+                    if (engineName) {
+                        localStorage.setItem('selenium_llm_model_' + engineName, modelSelect.value);
+                    }
+                    var modelInfo = document.getElementById('model-select-info');
+                    if (modelInfo && engineName && modelSelect.value) {
+                        modelInfo.textContent = 'This engine exposes multiple models. The selected one will be sent as ' + engineName + ':' + modelSelect.value;
+                    }
+                });
+            }
             loadEngines();
             refreshStats();
             startLogPolling();
