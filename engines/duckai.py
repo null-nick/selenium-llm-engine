@@ -170,7 +170,6 @@ class DuckAIEngine(SeleniumLLMBase):
         xpaths = [
             "//*[contains(normalize-space(.), \"You've reached the maximum number of messages for one day\")]",
             "//*[contains(normalize-space(.), \"Please continue this chat tomorrow\")]",
-            "//*[self::span or self::p][contains(normalize-space(.), 'Oops')]",
         ]
         for xpath in xpaths:
             try:
