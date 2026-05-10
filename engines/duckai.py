@@ -70,6 +70,11 @@ class DuckAIEngine(SeleniumLLMBase):
             "button[aria-label*='Interrompi']",
             "button[aria-label*='Stop']",
         ]
+        self.limit_selectors = [
+            "textarea[name='user-prompt'][disabled]",
+            "form[data-chat-footer='true'] textarea[disabled]",
+            "button[type='submit'][disabled]",
+        ]
         self.media_config = {
             "image": {
                 "limits": {"unlogged": 1, "base": 1, "paid": 1},
@@ -145,6 +150,37 @@ class DuckAIEngine(SeleniumLLMBase):
             "claude-haiku-4-5",
             "tinfoil/gpt-oss-120b",
         }
+
+    def _is_limit_present(self, driver: Any) -> bool:
+        if super()._is_limit_present(driver):
+            page_text = ""
+            try:
+                page_text = driver.find_element(By.TAG_NAME, "body").text or ""
+            except Exception:
+                pass
+            lowered = page_text.lower()
+            if (
+                "maximum number of messages for one day" in lowered
+                or "please continue this chat tomorrow" in lowered
+                or ("oops" in lowered and "learn more" in lowered and "chat tomorrow" in lowered)
+            ):
+                logger.debug("[duckai] Daily message limit detected from page text")
+                return True
+
+        xpaths = [
+            "//*[contains(normalize-space(.), \"You've reached the maximum number of messages for one day\")]",
+            "//*[contains(normalize-space(.), \"Please continue this chat tomorrow\")]",
+            "//*[self::span or self::p][contains(normalize-space(.), 'Oops')]",
+        ]
+        for xpath in xpaths:
+            try:
+                elements = driver.find_elements(By.XPATH, xpath)
+                if elements and any(self._element_is_displayed(el) for el in elements):
+                    logger.debug("[duckai] Limit xpath matched: %s", xpath)
+                    return True
+            except Exception:
+                pass
+        return False
 
     def _ensure_logged_in(self, driver: Any) -> bool:
         try:
