@@ -6,6 +6,8 @@ services:
     ports:
       - "14848:8000"  # API port
       - "3001:3001"   # webtop interface
+    environment:
+      CHROMIUM_USER_AGENT: ${CHROMIUM_USER_AGENT:-}
     volumes:
       - data:/app/data
       - config:/config

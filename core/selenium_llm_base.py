@@ -384,6 +384,11 @@ class SeleniumLLMBase:
         options.add_argument("--window-size=1280,900")
         options.add_argument(f"--user-data-dir={self.profile_dir}")
 
+        user_agent = os.getenv("CHROMIUM_USER_AGENT", "").strip()
+        if user_agent:
+            options.add_argument(f"--user-agent={user_agent}")
+            logger.info("[selenium] Using custom Chromium user agent")
+
         # Tell Chrome the previous session ended cleanly so it restores
         # session cookies and skips the "restore pages?" dialog.
         options.add_experimental_option("prefs", {
