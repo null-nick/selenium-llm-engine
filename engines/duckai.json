@@ -1,0 +1,67 @@
+{
+  "name": "duckai",
+  "display_name": "Duck.ai",
+  "aliases": ["duckai", "duck", "duckduckgo"],
+  "service_url": "https://duck.ai",
+  "default_model": "default",
+  "allow_unlogged": true,
+  "notes": "Selectors derived from real Duck.ai chat DOM dumps. Duck.ai is available without account, but model availability and limits may vary over time.",
+  "models": {
+    "unlogged": 12000,
+    "default": 12000
+  },
+  "selectors": {
+    "prompt_area": [
+      "textarea[name='user-prompt']",
+      "div[data-testid='duckai-chat-input'] textarea",
+      "form[data-chat-footer='true'] textarea",
+      "textarea[placeholder*='Rispondi']",
+      "textarea"
+    ],
+    "send_button": [
+      "button[type='submit'][aria-label='Invia']",
+      "form[data-chat-footer='true'] button[type='submit']",
+      "button[type='submit']"
+    ],
+    "response_area": [
+      "[data-activeresponse='true']",
+      "[id*='assistant-message']",
+      "div[id*='assistant-message']",
+      "[data-dark-theme] .space-y-4.whitespace-normal",
+      "div[data-dark-theme]"
+    ],
+    "stop": [
+      "button[aria-label='Interrompi la generazione']",
+      "button[aria-label*='Interrompi']",
+      "button[aria-label*='Stop']"
+    ]
+  },
+  "media_support": {
+    "image": {
+      "limits": {"unlogged": 1, "base": 1, "paid": 1},
+      "supported_models": ["all"],
+      "upload_selectors": [
+        "input[type='file'][name='upload'][accept*='image']",
+        "input[type='file'][name='upload']",
+        "input[type='file']"
+      ]
+    },
+    "document": {
+      "limits": {"unlogged": 1, "base": 1, "paid": 1},
+      "supported_models": ["all"],
+      "upload_selectors": [
+        "input[type='file'][name='upload'][accept*='pdf']",
+        "input[type='file'][name='upload']",
+        "input[type='file']"
+      ]
+    }
+  },
+  "login_detection": {
+    "url_prefix": "https://duck.ai",
+    "authenticated_css_selectors": [
+      "form[data-chat-footer='true']",
+      "div[data-testid='duckai-chat-input']",
+      "textarea[name='user-prompt']"
+    ]
+  }
+}
