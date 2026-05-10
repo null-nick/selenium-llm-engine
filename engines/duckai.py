@@ -295,6 +295,35 @@ class DuckAIEngine(SeleniumLLMBase):
                 return mapped
         return None
 
+    def _extract_response_text_from_element(self, driver: Any, element: Any) -> str:
+        text = super()._extract_response_text_from_element(driver, element)
+        return self._strip_response_header(text)
+
+    def _strip_response_header(self, text: str) -> str:
+        if not text:
+            return text
+        lines = text.splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        if not lines:
+            return ""
+
+        first_line = " ".join(lines[0].split())
+        mapped_model = self._map_button_label(first_line)
+        if not mapped_model:
+            return text.strip()
+
+        drop_count = 1
+        while len(lines) > drop_count:
+            marker = lines[drop_count].strip()
+            if marker in {"", "·", "•", "-", "—"}:
+                drop_count += 1
+                continue
+            break
+
+        cleaned = "\n".join(lines[drop_count:]).strip()
+        return cleaned or text.strip()
+
     def _map_reasoning_label(self, text: str) -> str | None:
         normalized = " ".join(text.lower().split())
         for mode, labels in self._reasoning_labels.items():
