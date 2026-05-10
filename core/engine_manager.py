@@ -192,6 +192,9 @@ def _scan_python(path: Path) -> Optional[EngineDescriptor]:
                     default_model=getattr(obj, "ENGINE_DEFAULT_MODEL", "default"),
                     allow_unlogged=bool(getattr(obj, "ENGINE_ALLOW_UNLOGGED", False)),
                     max_workers=int(getattr(obj, "ENGINE_MAX_WORKERS", 1)),
+                    media_capabilities=list(getattr(obj, "ENGINE_MEDIA_CAPABILITIES", [])),
+                    media_support=dict(getattr(obj, "ENGINE_MEDIA_SUPPORT", {})),
+                    reasoning_modes=list(getattr(obj, "ENGINE_REASONING_MODES", [])),
                     source="python",
                     source_path=str(path),
                 )

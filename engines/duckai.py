@@ -191,6 +191,8 @@ class DuckAIEngine(SeleniumLLMBase):
                 )
             if current_model != requested_model:
                 logger.info("[duckai] Switching model from %s to %s", current_model or "<unknown>", requested_model)
+                driver.get(f"{ENGINE_SERVICE_URL}/new")
+                time.sleep(0.8)
                 self._open_model_picker(driver)
                 self._click_model_option(driver, requested_model)
                 self._confirm_model_selection(driver, requested_model)
