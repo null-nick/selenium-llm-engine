@@ -201,6 +201,57 @@ class PizzaGPTEngine(SeleniumLLMBase):
             return self._model_aliases[lowered]
         return requested
 
+    def _fill_input(self, driver: Any, element: Any, text: str) -> None:
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});"
+                "arguments[0].removeAttribute('disabled');",
+                element,
+            )
+        except Exception:
+            pass
+
+        try:
+            element.click()
+        except Exception:
+            try:
+                driver.execute_script("arguments[0].click();", element)
+            except Exception:
+                pass
+
+        try:
+            driver.execute_script(
+                "const el = arguments[0];"
+                "const value = arguments[1];"
+                "const proto = window.HTMLTextAreaElement && window.HTMLTextAreaElement.prototype;"
+                "const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;"
+                "if (setter) { setter.call(el, value); } else { el.value = value; }"
+                "el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, composed: true, data: value, inputType: 'insertText' }));"
+                "el.dispatchEvent(new Event('change', { bubbles: true }));"
+                "el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'a' }));"
+                "el.style.height = 'auto';"
+                "el.style.height = Math.max(el.scrollHeight, 80) + 'px';",
+                element,
+                text,
+            )
+        except Exception:
+            pass
+
+        actual = (element.get_attribute('value') or '').strip()
+        if actual != text.strip():
+            try:
+                element.clear()
+            except Exception:
+                pass
+            try:
+                element.send_keys(text)
+            except Exception:
+                pass
+
+        actual = (element.get_attribute('value') or '').strip()
+        if actual != text.strip():
+            raise RuntimeError('[pizzagpt] fill_input verification failed: prompt content did not match expected text')
+
     def _extract_response_text_from_element(self, driver: Any, element: Any) -> str:
         try:
             result = driver.execute_script(
