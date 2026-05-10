@@ -1193,9 +1193,10 @@ class SeleniumLLMBase:
                             )
                             self._reset_driver()
                         continue
+                logger.warning(
+                    f"[selenium] Unhandled exception on attempt {attempt + 1}: {e}. Retrying..."
+                )
 
-            logger.warning(f"[selenium] Unhandled exception on attempt {attempt + 1}: {e}. Retrying...")
-            
         raise RuntimeError("_sync_generate_response exhausted retries")
 
     def _sync_generate_response_once(
